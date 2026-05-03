@@ -4,3 +4,4 @@ pillow
 tqdm
 numpy
 gnwmanager
+littlefs-python

@@ -26,6 +26,9 @@ EXTFLASH_OFFSET ?= 0
 
 FROGFS_IMAGE ?= $(BUILD_DIR)/frogfs.bin
 FROGFS_BUILD_DIR ?= $(BUILD_DIR)/frogfs
+LITTLEFS_IMAGE ?= $(BUILD_DIR)/littlefs.bin
+LITTLEFS_BUILD_DIR ?= $(BUILD_DIR)/littlefs
+LITTLEFS_BLOCK_SIZE ?= 4096
 
 SINGLE_FONT ?= 0
 
@@ -122,6 +125,56 @@ ifeq ($(SD_CARD),0)
 ifeq ($(shell [ $(EXTFLASH_OFFSET) -ge 0 -a $(EXTFLASH_SIZE) -gt 0 ] && echo true),)
 $(error FrogFS build needs EXTFLASH_OFFSET >= 0 and EXTFLASH_SIZE > 0 (partition size after offset, see EXTFLASH_SIZE_MB))
 endif
+# External flash map: offset + partition length must end on a power-of-two boundary (common chip / tooling layout).
+ifneq ($(shell end=$$(($(EXTFLASH_OFFSET) + $(EXTFLASH_SIZE))); \
+	if [ $$end -gt 0 ] && [ $$((end & (end - 1))) -eq 0 ]; then echo 1; else echo 0; fi),1)
+$(error EXTFLASH_OFFSET + EXTFLASH_SIZE must be a power of two (bytes). \
+	END=$$(($(EXTFLASH_OFFSET) + $(EXTFLASH_SIZE))) ($(shell echo $$(($(EXTFLASH_OFFSET) + $(EXTFLASH_SIZE))))) is not 2^n. \
+	Example with 4 MiB offset: use EXTFLASH_SIZE_MB=252 so END=256 MiB.)
+endif
+endif
+
+# Heuristic: if not set; 10% of your extflash should be good for filesystem.
+# Rounded down to the nearest 4096.
+FILESYSTEM_SIZE := $(shell \
+					if [ -z "$$FILESYSTEM_SIZE" ]; then \
+						echo $$(($(EXTFLASH_SIZE) / 10 / 4096 * 4096)); \
+					else \
+						echo $$FILESYSTEM_SIZE; \
+					fi)
+FILESYSTEM_OFFSET ?= $(shell echo $$(($(EXTFLASH_SIZE) - $(FILESYSTEM_SIZE))))
+FILESYSTEM_END = $(shell echo $$(($(FILESYSTEM_OFFSET) + $(FILESYSTEM_SIZE))))
+FILESYSTEM_OFFSET_FROM_END ?= $(shell echo $$(($(EXTFLASH_SIZE) - $(FILESYSTEM_END))))
+FILESYSTEM_FLASH_OFFSET := $(shell echo $$(($(EXTFLASH_OFFSET) + $(FILESYSTEM_OFFSET))))
+
+
+# Check to see if the filesystem is within specified extflash
+FILESYSTEM_START_IN_EXTFLASH_RANGE := $(shell \
+	if [ $(FILESYSTEM_OFFSET) -ge $(EXTFLASH_OFFSET) \
+		     -a $(FILESYSTEM_OFFSET) -lt $(EXTFLASH_END) ]; then \
+        echo "1"; \
+    else \
+        echo "0"; \
+    fi)
+
+FILESYSTEM_END_IN_EXTFLASH_RANGE := $(shell \
+	if [ $(FILESYSTEM_END) -gt $(EXTFLASH_OFFSET) \
+		     -a $(FILESYSTEM_END) -le $(EXTFLASH_END) ]; then \
+        echo "1"; \
+    else \
+        echo "0"; \
+    fi)
+
+ifneq ($(FILESYSTEM_START_IN_EXTFLASH_RANGE), $(FILESYSTEM_END_IN_EXTFLASH_RANGE))
+$(error Filesystem partition must be completely inside, or outside of EXTFLASH_SIZE.)
+endif
+FILESYSTEM_IN_EXTFLASH_RANGE = $(FILESYSTEM_START_IN_EXTFLASH_RANGE)
+
+# If the filesystem is external, we don't need to include it in size computation.
+ifeq ($(FILESYSTEM_IN_EXTFLASH_RANGE),0)
+EXTFLASH_TOTAL_LENGTH := $(EXTFLASH_SIZE)
+else ifeq ($(FILESYSTEM_START_IN_EXTFLASH_RANGE),1)
+EXTFLASH_TOTAL_LENGTH := $(shell echo $$(($(EXTFLASH_SIZE) - $(FILESYSTEM_SIZE))))
 endif
 
 ENABLE_SCREENSHOT ?= 1
@@ -257,16 +310,19 @@ C_SOURCES += Core/Src/gw_timer.c
 C_SOURCES += Core/src/softspi.c
 C_DEFS += -DGNW_DISABLE_COMPRESSION
 EXTFLASH_TOTAL_LENGTH = 0
+TAMP_C_SOURCES :=
 else
-FROGFS_DIR := Core/Src/porting/lib/frogfs
+# External flash layout: FrogFS + LittleFS (RW) + Tamp; not used with on-device SD reader.
 FATFS_C_SOURCES :=
-C_SOURCES += \
-Core/Src/retro-go/rg_frogfs.c \
-$(FROGFS_DIR)/src/frogfs.c \
-$(FROGFS_DIR)/src/decomp_raw.c
+C_SOURCES += $(FROGFS_C_SOURCES) \
+             $(LITTLEFS_C_SOURCES) \
+			 Core/Src/gw_littlefs.c
+C_DEFS += -DLFS_NO_MALLOC
 C_INCLUDES += \
 -I$(FROGFS_DIR)/include \
--I$(FROGFS_DIR)/src
+-I$(FROGFS_DIR)/src \
+-ICore/Src/porting/lib/littlefs/ \
+-ICore/Src/porting/lib/tamp/tamp/_c_src
 C_DEFS += -DGNW_DISABLE_COMPRESSION # not supported for now
 endif
 
@@ -486,7 +542,6 @@ C_DEFS +=  \
 -DSTM32H7B0xx \
 -DIS_LITTLE_ENDIAN \
 -DDEBUG_RG_ALLOC \
--DLFS_NO_MALLOC \
 -DENABLE_SCREENSHOT=$(ENABLE_SCREENSHOT) \
 -DSD_CARD=$(SD_CARD) \
 -DCHEAT_CODES=$(CHEAT_CODES) \
@@ -578,6 +633,8 @@ CXXFLAGS = $(CFLAGS) $(CXX_INCLUDES) \
 LDFLAGS += -Wl,--defsym=__EXTFLASH_OFFSET__=$(EXTFLASH_OFFSET)
 LDFLAGS += -Wl,--defsym=__EXTFLASH_TOTAL_LENGTH__=$(EXTFLASH_TOTAL_LENGTH)
 LDFLAGS += -Wl,--defsym=ENABLE_SCREENSHOT=$(ENABLE_SCREENSHOT)
+LDFLAGS += -Wl,--defsym=__FILESYSTEM_OFFSET__=$(FILESYSTEM_OFFSET)
+LDFLAGS += -Wl,--defsym=__FILESYSTEM_LENGTH__=$(FILESYSTEM_SIZE)
 
 LDFLAGS += -Wl,--defsym=__INTFLASH__=$(INTFLASH_ADDRESS)
 
@@ -621,6 +678,7 @@ endif
 # list of objects
 OBJECTS = $(addprefix $(BUILD_DIR)/core/,$(notdir $(C_SOURCES:.c=.o) $(SDK_C_SOURCES:.c=.o)))
 FATFS_OBJECTS = $(addprefix $(BUILD_DIR)/fatfs/,$(notdir $(FATFS_C_SOURCES:.c=.o)))
+TAMP_OBJECTS = $(addprefix $(BUILD_DIR)/tamp/,$(notdir $(TAMP_C_SOURCES:.c=.o)))
 TGBDUAL_OBJECTS = $(addprefix $(BUILD_DIR)/tgbdual/,$(notdir $(TGBDUAL_C_SOURCES:.c=.o)))
 NES_OBJECTS = $(addprefix $(BUILD_DIR)/nes/,$(notdir $(NES_C_SOURCES:.c=.o)))
 NES_FCEU_OBJECTS = $(addprefix $(BUILD_DIR)/nes_fceu/,$(notdir $(NES_FCEU_C_SOURCES:.c=.o)))
@@ -642,7 +700,7 @@ PICO8_OBJECTS = $(addprefix $(BUILD_DIR)/pico8/,$(notdir $(patsubst %.cpp,%.o,$(
 TAMA_OBJECTS = $(addprefix $(BUILD_DIR)/tama/,$(notdir $(TAMA_C_SOURCES:.c=.o)))
 PKMINI_OBJECTS = $(addprefix $(BUILD_DIR)/pkmini/,$(notdir $(PKMINI_C_SOURCES:.c=.o)))
 
-vpath %.c $(sort $(dir $(C_SOURCES) $(FATFS_C_SOURCES) $(NES_C_SOURCES) $(NES_FCEU_C_SOURCES) $(TGBDUAL_C_SOURCES) $(TGBDUAL_C_SOURCES) $(SMSPLUSGX_C_SOURCES) $(PCE_C_SOURCES) $(MSX_C_SOURCES) $(GW_C_SOURCES) $(WSV_C_SOURCES) $(MD_C_SOURCES) $(A2600_C_SOURCES) $(A7800_C_SOURCES) $(AMSTRAD_C_SOURCES) $(ZELDA3_C_SOURCES) $(SMW_C_SOURCES) $(VIDEOPAC_C_SOURCES) $(CELESTE_C_SOURCES) $(TAMA_C_SOURCES) $(PKMINI_C_SOURCES) $(PICO8_C_SOURCES) $(SDK_C_SOURCES)))
+vpath %.c $(sort $(dir $(C_SOURCES) $(FATFS_C_SOURCES) $(TAMP_C_SOURCES) $(NES_C_SOURCES) $(NES_FCEU_C_SOURCES) $(TGBDUAL_C_SOURCES) $(TGBDUAL_C_SOURCES) $(SMSPLUSGX_C_SOURCES) $(PCE_C_SOURCES) $(MSX_C_SOURCES) $(GW_C_SOURCES) $(WSV_C_SOURCES) $(MD_C_SOURCES) $(A2600_C_SOURCES) $(A7800_C_SOURCES) $(AMSTRAD_C_SOURCES) $(ZELDA3_C_SOURCES) $(SMW_C_SOURCES) $(VIDEOPAC_C_SOURCES) $(CELESTE_C_SOURCES) $(TAMA_C_SOURCES) $(PKMINI_C_SOURCES) $(PICO8_C_SOURCES) $(SDK_C_SOURCES)))
 # Guard empty lists: vpath with empty path resets the pattern's search path.
 # The GPL stub build has no PICO8_CXX_SOURCES, so only emit these when non-empty.
 ifneq ($(strip $(PICO8_CXX_SOURCES)),)
@@ -755,17 +813,25 @@ $(BUILD_DIR)/%.o: %.s Makefile.common Makefile | $(BUILD_DIR)
 	$(V)$(ECHO) [ AS ] $(notdir $<)
 	$(V)$(AS) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) $(FATFS_OBJECTS) $(A7800_OBJECTS) $(NES_OBJECTS) $(NES_FCEU_OBJECTS) $(TGBDUAL_OBJECTS) $(SMSPLUSGX_OBJECTS) $(PCE_OBJECTS) $(MSX_OBJECTS) $(GW_OBJECTS) $(WSV_OBJECTS) $(MD_OBJECTS) $(AMSTRAD_OBJECTS) $(VIDEOPAC_OBJECTS) $(CELESTE_OBJECTS) $(CXX_OBJECTS) $(TGBDUAL_CXX_OBJECTS) $(A2600_OBJECTS) $(A2600_CXX_OBJECTS) $(ZELDA3_OBJECTS) $(SMW_OBJECTS) $(TAMA_OBJECTS) $(PKMINI_OBJECTS) $(PICO8_OBJECTS) Makefile.common Makefile PrepareFceummMappers $(LDSCRIPT)
+$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) $(FATFS_OBJECTS) $(TAMP_OBJECTS) $(A7800_OBJECTS) $(NES_OBJECTS) $(NES_FCEU_OBJECTS) $(TGBDUAL_OBJECTS) $(SMSPLUSGX_OBJECTS) $(PCE_OBJECTS) $(MSX_OBJECTS) $(GW_OBJECTS) $(WSV_OBJECTS) $(MD_OBJECTS) $(AMSTRAD_OBJECTS) $(VIDEOPAC_OBJECTS) $(CELESTE_OBJECTS) $(CXX_OBJECTS) $(TGBDUAL_CXX_OBJECTS) $(A2600_OBJECTS) $(A2600_CXX_OBJECTS) $(ZELDA3_OBJECTS) $(SMW_OBJECTS) $(TAMA_OBJECTS) $(PKMINI_OBJECTS) $(PICO8_OBJECTS) Makefile.common Makefile PrepareFceummMappers $(LDSCRIPT)
 	$(V)$(ECHO) [ LD ] $(notdir $@)
-	$(V)$(CC) $(OBJECTS) $(FATFS_OBJECTS) $(A7800_OBJECTS) $(NES_OBJECTS) $(NES_FCEU_OBJECTS) $(TGBDUAL_OBJECTS) $(SMSPLUSGX_OBJECTS) $(PCE_OBJECTS) $(MSX_OBJECTS) $(GW_OBJECTS) $(WSV_OBJECTS) $(MD_OBJECTS) $(AMSTRAD_OBJECTS) $(VIDEOPAC_OBJECTS) $(CELESTE_OBJECTS) $(CXX_OBJECTS) $(TGBDUAL_CXX_OBJECTS) $(A2600_OBJECTS) $(A2600_CXX_OBJECTS) $(ZELDA3_OBJECTS) $(SMW_OBJECTS) $(TAMA_OBJECTS) $(PKMINI_OBJECTS) $(PICO8_OBJECTS) $(LDFLAGS) -o $@
+	$(V)$(CC) $(OBJECTS) $(FATFS_OBJECTS) $(TAMP_OBJECTS) $(A7800_OBJECTS) $(NES_OBJECTS) $(NES_FCEU_OBJECTS) $(TGBDUAL_OBJECTS) $(SMSPLUSGX_OBJECTS) $(PCE_OBJECTS) $(MSX_OBJECTS) $(GW_OBJECTS) $(WSV_OBJECTS) $(MD_OBJECTS) $(AMSTRAD_OBJECTS) $(VIDEOPAC_OBJECTS) $(CELESTE_OBJECTS) $(CXX_OBJECTS) $(TGBDUAL_CXX_OBJECTS) $(A2600_OBJECTS) $(A2600_CXX_OBJECTS) $(ZELDA3_OBJECTS) $(SMW_OBJECTS) $(TAMA_OBJECTS) $(PKMINI_OBJECTS) $(PICO8_OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/core/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) [ CC core ] $(notdir $<)
 	$(V)$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/core/$(notdir $(<:.c=.lst)) $< -o $@
 
+ifeq ($(SD_CARD), 1)
 $(BUILD_DIR)/fatfs/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) [ CC FatFs ] $(notdir $<)
 	$(V)$(CC) -c $(CFLAGS) $(FATFS_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/fatfs/$(notdir $(<:.c=.lst)) $< -o $@
+endif
+
+ifneq ($(SD_CARD), 1)
+$(TAMP_OBJECTS): $(BUILD_DIR)/tamp/%.o: $(TAMP_DIR)tamp/%.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
+	$(V)$(ECHO) [ CC tamp ] $(notdir $<)
+	$(V)$(CC) -c $(CFLAGS) $(TAMP_C_INCLUDES) -Wa,-a,-ad,-alms=$(BUILD_DIR)/tamp/$(notdir $(<:.c=.lst)) $< -o $@
+endif
 
 $(BUILD_DIR)/nes/%.o: %.c Makefile.common Makefile $(SDK_HEADERS) | $(BUILD_DIR)
 	$(V)$(ECHO) [ CC nes ] $(notdir $<)
@@ -984,6 +1050,7 @@ $(BUILD_DIR):
 	$(V)mkdir $@/core
 	$(V)mkdir $@/cores
 	$(V)mkdir $@/fatfs
+	$(V)mkdir $@/tamp
 	$(V)mkdir $@/nes
 	$(V)mkdir $@/nes_fceu
 	$(V)mkdir $@/tgbdual
@@ -1054,8 +1121,9 @@ flash_intflash: $(BUILD_DIR)/$(TARGET)_intflash.bin
 
 flash_extflash:
 ifeq ($(SD_CARD), 0)
-	@$(MAKE) --no-print-directory $(FROGFS_IMAGE)
+	@$(MAKE) --no-print-directory $(FROGFS_IMAGE) $(LITTLEFS_IMAGE)
 	$(GNWMANAGER) flash ext $(FROGFS_IMAGE) --offset=$(EXTFLASH_OFFSET) \
+		-- flash ext $(LITTLEFS_IMAGE) --offset=$(FILESYSTEM_FLASH_OFFSET) \
 		-- start $(INTFLASH_ADDRESS)
 endif
 .PHONY: flash_extflash
@@ -1063,9 +1131,10 @@ endif
 # Programs both the external and internal flash.
 flash: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin $(if $(filter-out 0,$(SD_CARD)),$(BUILD_DIR)/$(TARGET)_extflash.bin,)
 ifeq ($(SD_CARD), 0)
-	@$(MAKE) --no-print-directory $(FROGFS_IMAGE)
+	@$(MAKE) --no-print-directory $(FROGFS_IMAGE) $(LITTLEFS_IMAGE)
 	$(GNWMANAGER) flash $(INTFLASH_ADDRESS) $(BUILD_DIR)/$(TARGET)_intflash.bin \
 		-- flash ext $(FROGFS_IMAGE) --offset=$(EXTFLASH_OFFSET) \
+		-- flash ext $(LITTLEFS_IMAGE) --offset=$(FILESYSTEM_FLASH_OFFSET) \
 		-- start $(INTFLASH_ADDRESS) \
 		$(RESET_DBGMCU_CMD);
 else
@@ -1193,7 +1262,7 @@ create_sd_data: create_sd_folders prepare_msx_bios_files $(MAPPER_BINS) $(BUILD_
 	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank2.bin
 	@$(MAKE) --no-print-directory $(UNICODE_FONT_BINS)
 
-$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py $(FROGFS_DIR)/tools/mkfrogfs.py
+$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py tools/gencovers.py $(FROGFS_DIR)/tools/mkfrogfs.py
 	$(V)$(PYTHON3) scripts/gen_frogfs_image.py \
 		--sd-content $(SD_FOLDER) \
 		--output $@ \
@@ -1202,6 +1271,17 @@ $(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py $(FROGFS_DIR)/tools/
 
 frogfs_image: $(FROGFS_IMAGE)
 .PHONY: frogfs_image
+
+$(LITTLEFS_IMAGE): create_sd_data scripts/gen_littlefs_image.py
+	$(V)$(PYTHON3) scripts/gen_littlefs_image.py \
+		--sd-content $(SD_FOLDER) \
+		--output $@ \
+		--build-dir $(LITTLEFS_BUILD_DIR) \
+		--size $(FILESYSTEM_SIZE) \
+		--block-size $(LITTLEFS_BLOCK_SIZE)
+
+littlefs_image: $(LITTLEFS_IMAGE)
+.PHONY: littlefs_image
 
 flash_sd: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin create_sd_data
 	$(eval MAPPERS_SDPUSH := $(foreach mapper,$(MAPPER_NAMES),-- sdpush --file $(MAPPERS_DIR)/mapper_$(mapper).bin --dest-path "/cores/mappers/"))
@@ -1251,7 +1331,7 @@ release_sdpush: release
 		$(RESET_DBGMCU_CMD)
 
 monitor:
-	@$(GNWMANAGER) monitor
+	@$(GNWMANAGER) monitor --utf8
 .PHONY: monitor
 
 flash-monitor: flash
@@ -1313,7 +1393,13 @@ help:
 	@echo "  SD_CARD             - Use SD Card reader (default=0)"
 	@echo "                        set to 1 for auto detect between SD Card reader on spi1 (Design by Tim"
 	@echo "                        Schuerewegen) or on ospi1 (Design by *yota9* Vladislav Khmelevsky)"
+	@echo "  FILESYSTEM_SIZE     - Sets the littleFS partition flash size in bytes. Defaults to 10% of flash."
+	@echo "  FILESYSTEM_OFFSET   - Places the littleFS partition at a specified offset in the external flash. "
+	@echo "                        Defaults to placing the partition at the end of flash."
+	@echo "						   This value is offset from EXTFLASH_OFFSET."
+	@echo "  LITTLEFS_BLOCK_SIZE - Sets the generated littleFS image block/erase size in bytes. Defaults to 4096."
 	@echo "  EXTFLASH_OFFSET     - Places the data at an offset in the external flash (useful for dual boot)"
+	@echo "                        For SD_CARD=0, EXTFLASH_OFFSET+EXTFLASH_SIZE must be a power of two (bytes)."
 	@echo "  INTFLASH_BANK       - Sets the internal flash bank. Valid values {1,2} (default=1)."
 	@echo "  INTFLASH_ADDRESS    - Explicit internal flash address. If not provided, derived from INTFLASH_BANK."
 	@echo "  BIG_BANK            - Use internal flash bank as undocumented 256k.(default=1, set 0 to 128k)."

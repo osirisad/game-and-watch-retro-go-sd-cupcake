@@ -169,7 +169,8 @@ static void odroid_system_get_path_buf(emu_path_type_t type, const char *_romPat
         }
 
         case ODROID_PATH_CHEAT_STATE:
-            snprintf(out, out_size, "%s%s.state", ODROID_BASE_PATH_CHEATS, fileName);
+            /* Persist active cheat bitmask alongside savestates (writable /data). */
+            snprintf(out, out_size, "%s%s.state", ODROID_BASE_PATH_SAVES, fileName);
             break;
 
         case ODROID_PATH_CHEAT_PCE:

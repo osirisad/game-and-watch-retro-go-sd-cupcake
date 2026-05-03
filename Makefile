@@ -46,13 +46,31 @@ Core/Src/stm32h7xx_hal_msp.c \
 Core/Src/stm32h7xx_it.c \
 Core/Src/system_stm32h7xx.c
 
+FATFS_DIR = Core/Src/porting/lib/FatFs
 FATFS_C_SOURCES = \
-Core/Src/porting/lib/FatFs/user_diskio.c \
-Core/Src/porting/lib/FatFs/ff.c \
-Core/Src/porting/lib/FatFs/ffsystem.c \
-Core/Src/porting/lib/FatFs/ffunicode.c \
-Core/Src/porting/lib/FatFs/user_diskio_spi.c \
-Core/Src/porting/lib/FatFs/user_diskio_softspi.c
+$(FATFS_DIR)/user_diskio.c \
+$(FATFS_DIR)/ff.c \
+$(FATFS_DIR)/ffsystem.c \
+$(FATFS_DIR)/ffunicode.c \
+$(FATFS_DIR)/user_diskio_spi.c \
+$(FATFS_DIR)/user_diskio_softspi.c
+
+FROGFS_DIR = Core/Src/porting/lib/frogfs
+FROGFS_C_SOURCES = \
+Core/Src/retro-go/rg_frogfs.c \
+$(FROGFS_DIR)/src/frogfs.c \
+$(FROGFS_DIR)/src/decomp_raw.c
+
+LITTLEFS_DIR = Core/Src/porting/lib/littlefs
+LITTLEFS_C_SOURCES = \
+$(LITTLEFS_DIR)/lfs.c \
+$(LITTLEFS_DIR)/lfs_util.c
+
+TAMP_DIR = Core/Src/porting/lib/tamp/tamp/_c_src/
+TAMP_C_SOURCES = \
+$(TAMP_DIR)/tamp/common.c \
+$(TAMP_DIR)/tamp/compressor.c \
+$(TAMP_DIR)/tamp/decompressor.c
 
 # Add common C++ sources here
 CXX_SOURCES = \
@@ -1081,6 +1099,8 @@ PKMINI_C_INCLUDES +=  \
 -I$(CORE_PKMINI)/freebios \
 -I$(CORE_PKMINI)/libretro/libretro-common/include \
 -I./
+
+TAMP_C_INCLUDES += -I$(TAMP_DIR)
 
 include Makefile.common
 

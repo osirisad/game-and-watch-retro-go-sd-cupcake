@@ -27,6 +27,8 @@
 #include "gw_ofw.h"
 #if SD_CARD == 1
 #include "gw_flash_alloc.h"
+#else
+#include "gw_littlefs.h"
 #endif
 
 #if !defined(COVERFLOW)
@@ -968,6 +970,24 @@ void GLOBAL_DATA app_sleep_transition(bool show_logo, bool slow) {
     app_animate_lcd_brightness(odroid_display_get_backlight_raw(), 0, slow ? 1 : 2);
 }
 
+void GLOBAL_DATA app_sleep_logo()
+{
+    for (int i = 10; i <= 100; i+=2)
+    {
+        lcd_sleep_while_swap_pending();
+        odroid_overlay_draw_fill_rect(0, 0, ODROID_SCREEN_WIDTH, ODROID_SCREEN_HEIGHT, curr_colors->bg_c);
+        odroid_overlay_draw_logo((ODROID_SCREEN_WIDTH - logo_gnw.width) / 2, 90,(retro_logo_image *)(&logo_gnw),
+            get_darken_pixel_d(curr_colors->sel_c, curr_colors->bg_c, 110 - i));
+
+        odroid_overlay_draw_logo((ODROID_SCREEN_WIDTH - logo_rgo.width) / 2, 174, (retro_logo_image *)(&logo_rgo), 
+           get_darken_pixel_d(curr_colors->dis_c,curr_colors->bg_c, 110 - i));
+
+        lcd_swap();
+        wdog_refresh();
+        HAL_Delay(i / 10);
+    }
+}
+
 void GLOBAL_DATA app_main(uint8_t boot_mode)
 {
     lcd_set_buffers(framebuffer1, framebuffer2);
@@ -1007,6 +1027,9 @@ void GLOBAL_DATA app_main(uint8_t boot_mode)
     if (fs_mounted == false) {
         sdcard_error_screen();
     }
+#else
+    // Initialize the littleFS filesystem
+    fs_init();
 #endif
 
     // Re-initialize system now that the filesystem is mounted

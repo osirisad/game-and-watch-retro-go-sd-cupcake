@@ -6,9 +6,16 @@ import pathlib
 import shutil
 import subprocess
 import sys
+from collections import OrderedDict
 
 
-DEFAULT_DIRS = ("bios", "cores", "fonts", "font", "roms")
+DEFAULT_DIRS = ("bios", "covers", "fonts", "roms")
+# Under /roms, do not duplicate trees that are merged into /bios (routing uses /bios for FrogFS).
+ROMS_TOP_EXCLUDE_FOR_BIOS_MERGE = frozenset({"bios"})
+# Artifacts / compressed ROMs not packed into FrogFS /roms (covers live under /covers).
+ROMS_SKIP_EXTENSIONS = frozenset({".lzma", ".img", ".jpg", ".jpeg", ".png", ".bmp"})
+# Thumbnails from tools/gencovers.py (--dst); merged into FrogFS /covers (not repo ./covers).
+GENERATED_COVERS_SUBDIR = "covers_from_roms"
 
 
 def parse_int(value):
@@ -17,6 +24,43 @@ def parse_int(value):
 
 def is_md_rom(dest, rel_path):
     return dest == "roms" and len(rel_path.parts) > 1 and rel_path.parts[0].lower() == "md" and rel_path.name != ".DS_Store"
+
+
+def skip_under_roms_top(rel_path, exclude_top):
+    if not exclude_top or not rel_path.parts:
+        return False
+    return rel_path.parts[0].lower() in exclude_top
+
+
+def skip_roms_file_by_extension(dest, path):
+    return dest == "roms" and path.is_file() and path.suffix.lower() in ROMS_SKIP_EXTENSIONS
+
+
+def run_gencovers(repo: pathlib.Path, build_dir: pathlib.Path, rom_dirs):
+    """Run tools/gencovers.py for each distinct rom tree into build_dir / GENERATED_COVERS_SUBDIR."""
+    tool = repo / "tools" / "gencovers.py"
+    if not tool.is_file():
+        print(f"gencovers.py not found: {tool}", file=sys.stderr)
+        return False
+
+    dst = build_dir / GENERATED_COVERS_SUBDIR
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+
+    seen = set()
+    for rom_root in rom_dirs:
+        if not rom_root or not rom_root.is_dir():
+            continue
+        resolved = rom_root.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        subprocess.check_call(
+            [sys.executable, str(tool), "--src", str(rom_root), "--dst", str(dst)],
+            cwd=str(repo),
+        )
+    return True
 
 
 def link_or_copy(src, dst):
@@ -55,29 +99,40 @@ def copy_byteswapped_16(src, dst):
     shutil.copystat(src, dst)
 
 
-def stage_input_dirs(collect_dirs, stage_dir):
+def stage_input_dirs(collect_dirs, stage_dir, roms_exclude_top=None):
+    """Merge multiple (src, dest) with the same dest into one staged tree."""
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     stage_dir.mkdir(parents=True)
 
+    roms_exclude_top = roms_exclude_top or frozenset()
+    by_dest = OrderedDict()
+    for src, dest in collect_dirs:
+        by_dest.setdefault(dest, []).append(src)
+
     staged_dirs = []
     byteswapped_count = 0
-    for src, dest in collect_dirs:
+    for dest, sources in by_dest.items():
         staged_root = stage_dir / dest
         staged_root.mkdir(parents=True, exist_ok=True)
         staged_dirs.append((staged_root, dest))
 
-        for path in src.rglob("*"):
-            rel_path = path.relative_to(src)
-            staged_path = staged_root / rel_path
-            if path.is_dir():
-                staged_path.mkdir(parents=True, exist_ok=True)
-            elif path.is_file():
-                if is_md_rom(dest, rel_path):
-                    copy_byteswapped_16(path, staged_path)
-                    byteswapped_count += 1
-                else:
-                    link_or_copy(path, staged_path)
+        for src in sources:
+            for path in src.rglob("*"):
+                rel_path = path.relative_to(src)
+                if dest == "roms" and skip_under_roms_top(rel_path, roms_exclude_top):
+                    continue
+                staged_path = staged_root / rel_path
+                if path.is_dir():
+                    staged_path.mkdir(parents=True, exist_ok=True)
+                elif path.is_file():
+                    if skip_roms_file_by_extension(dest, path):
+                        continue
+                    if is_md_rom(dest, rel_path):
+                        copy_byteswapped_16(path, staged_path)
+                        byteswapped_count += 1
+                    else:
+                        link_or_copy(path, staged_path)
 
     return staged_dirs, byteswapped_count
 
@@ -91,10 +146,20 @@ def main():
         "--include",
         action="append",
         default=[],
-        help="Top-level sd_content directory to include. May be repeated. Defaults to bios, cores, fonts/font and roms when present.",
+        help=(
+            "Top-level sd_content directory to include. May be repeated. "
+            "Defaults to bios, covers, fonts/font and roms; roms/bios is merged into /bios. "
+            "/covers is built from tools/gencovers.py (roms + sd_content/roms images) into "
+            "build-dir/covers_from_roms, then sd_content/covers overlays."
+        ),
     )
     parser.add_argument("--roms-dir", default="roms", help="Project root ROM directory to merge into /roms when present")
     parser.add_argument("--reserve-size", type=parse_int, default=0, help="Optional maximum reserved size in bytes")
+    parser.add_argument(
+        "--no-gencovers",
+        action="store_true",
+        help="Do not run tools/gencovers.py; only sd_content/covers is used for /covers (if any).",
+    )
     args = parser.parse_args()
 
     repo = pathlib.Path(__file__).resolve().parents[1]
@@ -111,26 +176,70 @@ def main():
         print(f"sd_content directory not found: {sd_content}", file=sys.stderr)
         return 1
 
+    build_dir.mkdir(parents=True, exist_ok=True)
+
     requested_dirs = tuple(args.include) if args.include else DEFAULT_DIRS
     collect_dirs = []
 
     project_roms = (repo / args.roms_dir).resolve()
+    sd_roms = sd_content / "roms"
+
+    if "covers" in requested_dirs and not args.no_gencovers:
+        if not run_gencovers(repo, build_dir, (project_roms, sd_roms)):
+            return 1
+
     if project_roms.is_dir():
         collect_dirs.append((project_roms, "roms"))
 
+    # /bios: sd_content/bios + sd_content/roms/bios + project roms/bios (FrogFS path is /bios, not /roms/bios).
+    bios_sources = []
+    sd_bios = sd_content / "bios"
+    if sd_bios.is_dir():
+        bios_sources.append(sd_bios)
+    sd_roms_bios = sd_content / "roms" / "bios"
+    if sd_roms_bios.is_dir():
+        bios_sources.append(sd_roms_bios)
+    if project_roms.is_dir():
+        proj_bios = project_roms / "bios"
+        if proj_bios.is_dir() and proj_bios not in bios_sources:
+            bios_sources.append(proj_bios)
+    for bsrc in bios_sources:
+        collect_dirs.append((bsrc, "bios"))
+
+    # /covers: tools/gencovers.py output under build_dir, then sd_content/covers overlays.
+    if "covers" in requested_dirs:
+        covers_sources = []
+        if not args.no_gencovers:
+            generated_covers = build_dir / GENERATED_COVERS_SUBDIR
+            if generated_covers.is_dir():
+                covers_sources.append(generated_covers)
+        sd_covers = sd_content / "covers"
+        if sd_covers.is_dir():
+            covers_sources.append(sd_covers)
+        for csrc in covers_sources:
+            collect_dirs.append((csrc, "covers"))
+
     for dirname in requested_dirs:
+        if dirname in ("bios", "roms", "covers"):
+            continue
         src = sd_content / dirname
         if src.is_dir():
             collect_dirs.append((src, dirname))
+
+    if sd_roms.is_dir():
+        collect_dirs.append((sd_roms, "roms"))
 
     if not collect_dirs:
         print(f"No FrogFS input directories found in {sd_content}", file=sys.stderr)
         return 1
 
-    build_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    staged_dirs, byteswapped_count = stage_input_dirs(collect_dirs, build_dir / "input")
+    staged_dirs, byteswapped_count = stage_input_dirs(
+        collect_dirs,
+        build_dir / "input",
+        roms_exclude_top=ROMS_TOP_EXCLUDE_FOR_BIOS_MERGE,
+    )
 
     config_path = build_dir / "frogfs.yaml"
     with config_path.open("w", encoding="utf-8") as config:
@@ -163,7 +272,7 @@ def main():
         )
         return 1
 
-    dirs = ", ".join("/" + dest for _, dest in collect_dirs)
+    dirs = ", ".join("/" + dest for _, dest in staged_dirs)
     print(f"Generated {output} ({size} bytes) from {dirs}")
     if byteswapped_count:
         print(f"Byteswapped {byteswapped_count} file(s) under /roms/md")

@@ -97,12 +97,23 @@ __RAM_END__         = __RAM_START__ + 1024K;
  *            |                                  |
  *            +----------------------------------+  __EXTFLASH_START__
  *            |                                  |
- *            |   FrogFS image (frogfs.bin)      |
+ *            |     FrogFS image (frogfs.bin)    |
  *            |                                  |
- *            +----------------------------------+  __EXTFLASH_END__
+ *            +----------------------------------+
+ *            |                                  |
+ *            |         Possibly Unused          |
+ *            |                                  |
+ *            +----------------------------------+  __EXTFLASH_END__ __FILESYSTEM_START__
+ *            |                                  |
+ *            |        LittleFS partition        |
+ *            |                                  |
+ *            +----------------------------------+  __FILESYSTEM_END__ __EXTFLASH_END__
  */
 __EXTFLASH_LENGTH__ = __EXTFLASH_TOTAL_LENGTH__;
 __EXTFLASH_END__ = __EXTFLASH_START__ + __EXTFLASH_LENGTH__;
+
+__FILESYSTEM_START__ = __EXTFLASH_START__ + __FILESYSTEM_OFFSET__;
+__FILESYSTEM_END__ = __FILESYSTEM_START__ + __FILESYSTEM_LENGTH__;
 
 /* scripts/size.sh: no ELF-linked payload in external flash (FrogFS is a separate binary). */
 __extflash_start__ = __EXTFLASH_START__;
@@ -807,6 +818,7 @@ SECTIONS
   {
     . = ALIGN(4);
     _sdata = .;        /* create a global symbol at data start */
+    *(.littlefs_cfg)
     *(.data)           /* .data sections */
     *(.data*)          /* .data* sections */
 

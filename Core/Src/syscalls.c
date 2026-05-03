@@ -8,10 +8,12 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include "rg_rtc.h"
 #if SD_CARD == 1
 #include "ff.h"
 #else
+#include "gw_littlefs.h"
 #include "rg_frogfs.h"
 #endif
 
@@ -374,30 +376,61 @@ int __wrap_fflush(int file) {
 extern uint32_t log_idx;
 extern char logbuf[1024 * 4];
 
-typedef struct {
-    frogfs_fh_t *file;
-    int is_open;
-} FrogFSFile;
-
 #define MAX_OPEN_FILES 10
-#define FROGFS_FD_OFFSET 3
+#define FS_FD_OFFSET 3
 
-static FrogFSFile file_table[MAX_OPEN_FILES];
+typedef enum {
+    FILE_BACKEND_NONE,
+    FILE_BACKEND_FROGFS,
+    FILE_BACKEND_LITTLEFS,
+} FileBackend;
+
+typedef struct {
+    FileBackend backend;
+    union {
+        frogfs_fh_t *frogfs;
+        fs_file_t *littlefs;
+    } file;
+} FileTableEntry;
+
+static FileTableEntry file_table[MAX_OPEN_FILES];
 
 void init_file_table(void)
 {
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        file_table[i].is_open = 0;
+        file_table[i].backend = FILE_BACKEND_NONE;
+        file_table[i].file.frogfs = NULL;
     }
 }
 
 static int find_free_slot(void)
 {
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!file_table[i].is_open)
+        if (file_table[i].backend == FILE_BACKEND_NONE)
             return i;
     }
     return -1;
+}
+
+static bool path_has_prefix_dir(const char *path, const char *dir)
+{
+    if (!path)
+        return false;
+
+    if (path[0] == '/')
+        path++;
+
+    size_t len = strlen(dir);
+    return strncmp(path, dir, len) == 0 && (path[len] == '\0' || path[len] == '/');
+}
+
+static bool is_frogfs_path(const char *path)
+{
+    return path_has_prefix_dir(path, "roms") ||
+           path_has_prefix_dir(path, "covers") ||
+           path_has_prefix_dir(path, "bios") ||
+           path_has_prefix_dir(path, "fonts") ||
+           path_has_prefix_dir(path, "font");
 }
 
 static const char *normalize_frogfs_path(const char *name, char *buffer, size_t buffer_size)
@@ -419,58 +452,99 @@ int _open(const char *name, int flags, int mode)
 {
     (void)mode;
 
-    if ((flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND))) {
-        errno = EROFS;
-        return -1;
-    }
-
-    frogfs_fs_t *fs = rg_frogfs_get();
-    if (!fs) {
-        errno = ENODEV;
-        return -1;
-    }
-
-    char normalized_name[PATH_MAX];
-    const char *frogfs_name = normalize_frogfs_path(name, normalized_name, sizeof(normalized_name));
-    if (!frogfs_name) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    const frogfs_entry_t *entry = frogfs_get_entry(fs, frogfs_name);
-    if (!entry || !frogfs_is_file(entry)) {
-        errno = ENOENT;
-        return -1;
-    }
-
     int slot = find_free_slot();
     if (slot == -1) {
         errno = ENFILE;
         return -1;
     }
 
-    frogfs_fh_t *file = frogfs_open(fs, entry, 0);
+    if (is_frogfs_path(name)) {
+        if ((flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND))) {
+            errno = EROFS;
+            return -1;
+        }
+
+        frogfs_fs_t *fs = rg_frogfs_get();
+        if (!fs) {
+            errno = ENODEV;
+            return -1;
+        }
+
+        char normalized_name[PATH_MAX];
+        const char *frogfs_name = normalize_frogfs_path(name, normalized_name, sizeof(normalized_name));
+        if (!frogfs_name) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        const frogfs_entry_t *entry = frogfs_get_entry(fs, frogfs_name);
+        if (!entry || !frogfs_is_file(entry)) {
+            errno = ENOENT;
+            return -1;
+        }
+
+        frogfs_fh_t *file = frogfs_open(fs, entry, 0);
+        if (!file) {
+            errno = EIO;
+            return -1;
+        }
+
+        file_table[slot].file.frogfs = file;
+        file_table[slot].backend = FILE_BACKEND_FROGFS;
+        return slot + FS_FD_OFFSET;
+    }
+
+    int lfs_flags;
+    switch (flags & O_ACCMODE) {
+        case O_RDONLY:
+            lfs_flags = LFS_O_RDONLY;
+            break;
+        case O_WRONLY:
+            lfs_flags = LFS_O_WRONLY;
+            break;
+        case O_RDWR:
+            lfs_flags = LFS_O_RDWR;
+            break;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+    if (flags & O_CREAT)
+        lfs_flags |= LFS_O_CREAT;
+    if (flags & O_EXCL)
+        lfs_flags |= LFS_O_EXCL;
+    if (flags & O_TRUNC)
+        lfs_flags |= LFS_O_TRUNC;
+    if (flags & O_APPEND)
+        lfs_flags |= LFS_O_APPEND;
+
+    fs_file_t *file = fs_open_flags(name, lfs_flags);
     if (!file) {
-        errno = EIO;
+        errno = (flags & O_ACCMODE) == O_RDONLY ? ENOENT : EIO;
         return -1;
     }
 
-    file_table[slot].file = file;
-    file_table[slot].is_open = 1;
-    return slot + FROGFS_FD_OFFSET;
+    file_table[slot].file.littlefs = file;
+    file_table[slot].backend = FILE_BACKEND_LITTLEFS;
+    return slot + FS_FD_OFFSET;
 }
 
 int _close(int file)
 {
-    file -= FROGFS_FD_OFFSET;
-    if (file < 0 || file >= MAX_OPEN_FILES || !file_table[file].is_open) {
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
         errno = EBADF;
         return -1;
     }
 
-    frogfs_close(file_table[file].file);
-    file_table[file].file = NULL;
-    file_table[file].is_open = 0;
+    if (file_table[file].backend == FILE_BACKEND_FROGFS) {
+        frogfs_close(file_table[file].file.frogfs);
+    } else {
+        fs_close(file_table[file].file.littlefs);
+    }
+
+    file_table[file].file.frogfs = NULL;
+    file_table[file].backend = FILE_BACKEND_NONE;
     return 0;
 }
 
@@ -490,30 +564,56 @@ int _write(int file, char *ptr, int len)
         return len;
     }
 
-    errno = EROFS;
-    return -1;
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
+        errno = EBADF;
+        return -1;
+    }
+
+    if (file_table[file].backend == FILE_BACKEND_FROGFS) {
+        errno = EROFS;
+        return -1;
+    }
+
+    int written = fs_write(file_table[file].file.littlefs, (unsigned char *)ptr, len);
+    if (written < 0) {
+        errno = EIO;
+        return -1;
+    }
+
+    return written;
 }
 
 int _read(int file, char *ptr, int len)
 {
-    file -= FROGFS_FD_OFFSET;
-    if (file < 0 || file >= MAX_OPEN_FILES || !file_table[file].is_open) {
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
         errno = EBADF;
         return -1;
     }
 
-    return frogfs_read(file_table[file].file, ptr, len);
+    if (file_table[file].backend == FILE_BACKEND_FROGFS)
+        return frogfs_read(file_table[file].file.frogfs, ptr, len);
+
+    int bytes_read = fs_read(file_table[file].file.littlefs, (unsigned char *)ptr, len);
+    if (bytes_read < 0) {
+        errno = EIO;
+        return -1;
+    }
+    return bytes_read;
 }
 
 off_t _lseek(int file, off_t offset, int whence)
 {
-    file -= FROGFS_FD_OFFSET;
-    if (file < 0 || file >= MAX_OPEN_FILES || !file_table[file].is_open) {
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
         errno = EBADF;
         return -1;
     }
 
-    ssize_t pos = frogfs_seek(file_table[file].file, offset, whence);
+    ssize_t pos = file_table[file].backend == FILE_BACKEND_FROGFS
+            ? frogfs_seek(file_table[file].file.frogfs, offset, whence)
+            : fs_seek(file_table[file].file.littlefs, offset, whence);
     if (pos < 0) {
         errno = EINVAL;
         return -1;
@@ -524,19 +624,26 @@ off_t _lseek(int file, off_t offset, int whence)
 
 int _fstat(int file, struct stat *st)
 {
-    file -= FROGFS_FD_OFFSET;
-    if (file < 0 || file >= MAX_OPEN_FILES || !file_table[file].is_open) {
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
         errno = EBADF;
         return -1;
     }
 
-    ssize_t pos = frogfs_tell(file_table[file].file);
-    ssize_t size = frogfs_seek(file_table[file].file, 0, SEEK_END);
+    ssize_t pos = file_table[file].backend == FILE_BACKEND_FROGFS
+            ? frogfs_tell(file_table[file].file.frogfs)
+            : fs_seek(file_table[file].file.littlefs, 0, SEEK_CUR);
+    ssize_t size = file_table[file].backend == FILE_BACKEND_FROGFS
+            ? frogfs_seek(file_table[file].file.frogfs, 0, SEEK_END)
+            : fs_seek(file_table[file].file.littlefs, 0, SEEK_END);
     if (pos < 0 || size < 0) {
         errno = EIO;
         return -1;
     }
-    frogfs_seek(file_table[file].file, pos, SEEK_SET);
+    if (file_table[file].backend == FILE_BACKEND_FROGFS)
+        frogfs_seek(file_table[file].file.frogfs, pos, SEEK_SET);
+    else
+        fs_seek(file_table[file].file.littlefs, pos, SEEK_SET);
 
     memset(st, 0, sizeof(*st));
     st->st_size = size;
@@ -546,65 +653,124 @@ int _fstat(int file, struct stat *st)
 
 int stat(const char *path, struct stat *st)
 {
-    frogfs_fs_t *fs = rg_frogfs_get();
-    if (!fs) {
-        errno = ENODEV;
-        return -1;
-    }
-
-    const frogfs_entry_t *entry = frogfs_get_entry(fs, path);
-    if (!entry) {
-        errno = ENOENT;
-        return -1;
-    }
-
-    frogfs_stat_t frog_stat;
-    frogfs_stat(fs, entry, &frog_stat);
-
     memset(st, 0, sizeof(*st));
-    st->st_size = frog_stat.size;
-    st->st_mode = frogfs_is_dir(entry) ? S_IFDIR : S_IFREG;
+
+    if (is_frogfs_path(path)) {
+        frogfs_fs_t *fs = rg_frogfs_get();
+        if (!fs) {
+            errno = ENODEV;
+            return -1;
+        }
+
+        char normalized_path[PATH_MAX];
+        const char *frogfs_path = normalize_frogfs_path(path, normalized_path, sizeof(normalized_path));
+        if (!frogfs_path) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        const frogfs_entry_t *entry = frogfs_get_entry(fs, frogfs_path);
+        if (!entry) {
+            errno = ENOENT;
+            return -1;
+        }
+
+        frogfs_stat_t frog_stat;
+        frogfs_stat(fs, entry, &frog_stat);
+
+        st->st_size = frog_stat.size;
+        st->st_mode = frogfs_is_dir(entry) ? S_IFDIR : S_IFREG;
+        return 0;
+    }
+
+    struct lfs_info info;
+    int res = fs_stat(path, &info);
+    if (res < 0) {
+        errno = res == LFS_ERR_NOENT ? ENOENT : EIO;
+        return -1;
+    }
+
+    st->st_size = info.size;
+    st->st_mode = info.type == LFS_TYPE_DIR ? S_IFDIR : S_IFREG;
+    uint32_t timestamp;
+    if (fs_get_file_time(path, &timestamp) == sizeof(timestamp))
+        st->st_mtime = timestamp;
     return 0;
 }
 
 int _feof(int file)
 {
-    file -= FROGFS_FD_OFFSET;
-    if (file < 0 || file >= MAX_OPEN_FILES || !file_table[file].is_open) {
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
         errno = EBADF;
         return -1;
     }
 
-    ssize_t pos = frogfs_tell(file_table[file].file);
-    ssize_t size = frogfs_seek(file_table[file].file, 0, SEEK_END);
+    ssize_t pos = file_table[file].backend == FILE_BACKEND_FROGFS
+            ? frogfs_tell(file_table[file].file.frogfs)
+            : fs_seek(file_table[file].file.littlefs, 0, SEEK_CUR);
+    ssize_t size = file_table[file].backend == FILE_BACKEND_FROGFS
+            ? frogfs_seek(file_table[file].file.frogfs, 0, SEEK_END)
+            : fs_seek(file_table[file].file.littlefs, 0, SEEK_END);
     if (pos < 0 || size < 0) {
         errno = EIO;
         return -1;
     }
-    frogfs_seek(file_table[file].file, pos, SEEK_SET);
+    if (file_table[file].backend == FILE_BACKEND_FROGFS)
+        frogfs_seek(file_table[file].file.frogfs, pos, SEEK_SET);
+    else
+        fs_seek(file_table[file].file.littlefs, pos, SEEK_SET);
     return pos >= size;
 }
 
 int mkdir(const char *path, mode_t mode)
 {
-    (void)path;
     (void)mode;
-    errno = EROFS;
-    return -1;
+
+    if (is_frogfs_path(path)) {
+        errno = EROFS;
+        return -1;
+    }
+
+    int res = fs_mkdir(path);
+    if (res < 0) {
+        errno = res == LFS_ERR_EXIST ? EEXIST : EIO;
+        return -1;
+    }
+
+    return 0;
 }
 
 int rmdir(const char *path)
 {
-    (void)path;
-    errno = EROFS;
-    return -1;
+    if (is_frogfs_path(path)) {
+        errno = EROFS;
+        return -1;
+    }
+
+    int res = fs_delete(path);
+    if (res < 0) {
+        errno = res == LFS_ERR_NOENT ? ENOENT : EIO;
+        return -1;
+    }
+
+    return 0;
 }
 
 int _unlink(const char *path)
 {
-    (void)path;
-    errno = EROFS;
-    return -1;
+    if (is_frogfs_path(path)) {
+        errno = EROFS;
+        return -1;
+    }
+
+    int res = fs_delete(path);
+    if (res < 0) {
+        errno = res == LFS_ERR_NOENT ? ENOENT : EIO;
+        return -1;
+    }
+
+    return 0;
 }
 
 int __wrap_fflush(int file)
@@ -612,9 +778,14 @@ int __wrap_fflush(int file)
     if (file == STDOUT_FILENO || file == STDERR_FILENO)
         return 0;
 
-    file -= FROGFS_FD_OFFSET;
-    if (file < 0 || file >= MAX_OPEN_FILES || !file_table[file].is_open) {
+    file -= FS_FD_OFFSET;
+    if (file < 0 || file >= MAX_OPEN_FILES || file_table[file].backend == FILE_BACKEND_NONE) {
         errno = EBADF;
+        return -1;
+    }
+
+    if (file_table[file].backend == FILE_BACKEND_LITTLEFS && fs_sync(file_table[file].file.littlefs) < 0) {
+        errno = EIO;
         return -1;
     }
 
