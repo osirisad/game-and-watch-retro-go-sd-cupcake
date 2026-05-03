@@ -1262,7 +1262,7 @@ create_sd_data: create_sd_folders prepare_msx_bios_files $(MAPPER_BINS) $(BUILD_
 	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank2.bin
 	@$(MAKE) --no-print-directory $(UNICODE_FONT_BINS)
 
-$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py tools/gencovers.py $(FROGFS_DIR)/tools/mkfrogfs.py
+$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py tools/gencovers.py external/zelda3/tables/restool.py external/smw/assets/restool.py $(FROGFS_DIR)/tools/mkfrogfs.py
 	$(V)$(PYTHON3) scripts/gen_frogfs_image.py \
 		--sd-content $(SD_FOLDER) \
 		--output $@ \
