@@ -1256,23 +1256,30 @@ create_sd_data: create_sd_folders prepare_msx_bios_files $(MAPPER_BINS) $(BUILD_
 	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank2.bin
 	@$(MAKE) --no-print-directory $(UNICODE_FONT_BINS)
 
-$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py tools/gencovers.py external/zelda3/tables/restool.py external/smw/assets/restool.py $(FROGFS_DIR)/tools/mkfrogfs.py
+# SD_CARD=0: pico8.ro is packed in FrogFS (post-patched for XiP); do not duplicate from GNW ZIP on LittleFS.
+FROGFS_PICO8_FLAGS := $(if $(filter 0,$(SD_CARD)),\
+	--bundle-pico8-ro-in-frogfs --extflash-base 0x90000000 --extflash-offset $(EXTFLASH_OFFSET),)
+LITTLEFS_OMIT_PICO8_RO := $(if $(filter 0,$(SD_CARD)),--omit-pico8-ro-from-gnw-zip,)
+
+$(FROGFS_IMAGE): create_sd_data scripts/gen_frogfs_image.py scripts/frogfs_pico8_ro.py scripts/pico8_ro_build_patch.py scripts/pico8_gnw_cores.py scripts/sd_cores_pack.py tools/gencovers.py external/zelda3/tables/restool.py external/smw/assets/restool.py $(FROGFS_DIR)/tools/mkfrogfs.py
 	$(V)$(PYTHON3) scripts/gen_frogfs_image.py \
 		--sd-content $(SD_FOLDER) \
 		--output $@ \
 		--build-dir $(FROGFS_BUILD_DIR) \
-		--reserve-size $(EXTFLASH_TOTAL_LENGTH)
+		--reserve-size $(EXTFLASH_TOTAL_LENGTH) \
+		$(FROGFS_PICO8_FLAGS)
 
 frogfs_image: $(FROGFS_IMAGE)
 .PHONY: frogfs_image
 
-$(LITTLEFS_IMAGE): create_sd_data scripts/gen_littlefs_image.py scripts/sd_cores_pack.py
+$(LITTLEFS_IMAGE): create_sd_data scripts/gen_littlefs_image.py scripts/sd_cores_pack.py scripts/pico8_gnw_cores.py
 	$(V)$(PYTHON3) scripts/gen_littlefs_image.py \
 		--sd-content $(SD_FOLDER) \
 		--output $@ \
 		--build-dir $(LITTLEFS_BUILD_DIR) \
 		--size $(FILESYSTEM_SIZE) \
-		--block-size $(LITTLEFS_BLOCK_SIZE)
+		--block-size $(LITTLEFS_BLOCK_SIZE) \
+		$(LITTLEFS_OMIT_PICO8_RO)
 
 littlefs_image: $(LITTLEFS_IMAGE)
 .PHONY: littlefs_image

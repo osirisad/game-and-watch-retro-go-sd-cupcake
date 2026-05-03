@@ -41,8 +41,23 @@ def skip_under_roms_top(rel_path, exclude_top):
     return rel_path.parts[0].lower() in exclude_top
 
 
-def skip_roms_file_by_extension(dest, path):
-    return dest == "roms" and path.is_file() and path.suffix.lower() in ROMS_SKIP_EXTENSIONS
+def skip_roms_file_by_extension(dest, path, rel_path):
+    if dest != "roms" or not path.is_file():
+        return False
+    # PNG exports / .p8.png carts use suffix ".png", which is normally skipped for /roms.
+    if is_pico8_cartridge_rom(rel_path, path):
+        return False
+    return path.suffix.lower() in ROMS_SKIP_EXTENSIONS
+
+
+def is_pico8_cartridge_rom(rel_path: pathlib.Path, path: pathlib.Path) -> bool:
+    """True if path should be packed as a PICO-8 game under /roms/pico8."""
+    if not rel_path.parts:
+        return False
+    if rel_path.parts[0].lower() != "pico8":
+        return False
+    name = path.name.lower()
+    return name.endswith(".p8") or name.endswith(".p8.png") or name.endswith(".png")
 
 
 def snes_rom_body_sha1(rom_path: pathlib.Path) -> str:
@@ -449,7 +464,7 @@ def stage_input_dirs(collect_dirs, stage_dir, roms_exclude_top=None, roms_skip_r
                 elif path.is_file():
                     if dest == "roms" and rel_path in roms_skip_rel_paths:
                         continue
-                    if skip_roms_file_by_extension(dest, path):
+                    if skip_roms_file_by_extension(dest, path, rel_path):
                         continue
                     if is_md_rom(dest, rel_path):
                         copy_byteswapped_16(path, staged_path)
@@ -483,6 +498,33 @@ def main():
         action="store_true",
         help="Do not run tools/gencovers.py; only sd_content/covers is used for /covers (if any).",
     )
+    parser.add_argument(
+        "--bundle-pico8-ro-in-frogfs",
+        action="store_true",
+        help="When roms/pico8 is active: add pico8.ro from GNW ZIP to FrogFS /cores and post-patch XiP sentinels.",
+    )
+    parser.add_argument(
+        "--refresh-pico8-cores",
+        action="store_true",
+        help="Force re-download of PICO-8 GNW ZIP when using --bundle-pico8-ro-in-frogfs.",
+    )
+    parser.add_argument(
+        "--pico8-cores-url",
+        default=None,
+        help="Override URL for PICO-8 GNW cores ZIP.",
+    )
+    parser.add_argument(
+        "--extflash-base",
+        type=parse_int,
+        default=0x90000000,
+        help="QSPI mmap base (__EXTFLASH_BASE__) for pico8.ro post-patch.",
+    )
+    parser.add_argument(
+        "--extflash-offset",
+        type=parse_int,
+        default=0,
+        help="Byte offset of Retro-Go region (__EXTFLASH_OFFSET__).",
+    )
     args = parser.parse_args()
 
     repo = pathlib.Path(__file__).resolve().parents[1]
@@ -506,6 +548,16 @@ def main():
 
     project_roms = (repo / args.roms_dir).resolve()
     sd_roms = sd_content / "roms"
+
+    scripts_dir = str(repo / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import sd_cores_pack  # noqa: E402
+
+    active_systems = sd_cores_pack.active_system_dirnames_from_roms_trees(
+        project_roms if project_roms.is_dir() else None,
+        sd_roms if sd_roms.is_dir() else None,
+    )
 
     frogfs_hb_extra = build_dir / FROGFS_HOMEBREW_EXTRA
     if frogfs_hb_extra.exists():
@@ -566,6 +618,30 @@ def main():
     if zelda3_frogfs_built or smw_frogfs_built:
         collect_dirs.append((build_dir / FROGFS_HOMEBREW_EXTRA, "roms"))
 
+    pico8_ro_in_frogfs = False
+    if args.bundle_pico8_ro_in_frogfs and "pico8" in active_systems:
+        import pico8_gnw_cores  # noqa: E402
+
+        cache = build_dir / pico8_gnw_cores.PICO8_CACHE_FILENAME
+        url = args.pico8_cores_url or pico8_gnw_cores.PICO8_GNW_CORES_ZIP_URL
+        zip_bytes = pico8_gnw_cores.fetch_zip_bytes(
+            cache, url, force_refresh=args.refresh_pico8_cores
+        )
+        st = build_dir / "frogfs_pico8_staging"
+        if st.exists():
+            shutil.rmtree(st)
+        st.mkdir(parents=True)
+        if not pico8_gnw_cores.extract_pico8_ro_from_zip_bytes(zip_bytes, st / "pico8.ro"):
+            print("frogfs: pico8.ro missing from GNW ZIP", file=sys.stderr)
+            return 1
+        collect_dirs.append((st, "cores"))
+        pico8_ro_in_frogfs = True
+    elif args.bundle_pico8_ro_in_frogfs:
+        print(
+            "frogfs: --bundle-pico8-ro-in-frogfs ignored (no pico8 ROM folder detected)",
+            file=sys.stderr,
+        )
+
     if not collect_dirs:
         print(f"No FrogFS input directories found in {sd_content}", file=sys.stderr)
         return 1
@@ -598,6 +674,9 @@ def main():
         config.write("    - discard\n")
         config.write("  '.DS_Store':\n")
         config.write("    - discard\n")
+        if pico8_ro_in_frogfs:
+            config.write("  'cores/pico8.ro':\n")
+            config.write("    - no compress\n")
 
     cmd = [
         sys.executable,
@@ -609,6 +688,16 @@ def main():
         str(output),
     ]
     subprocess.check_call(cmd)
+
+    if pico8_ro_in_frogfs:
+        import frogfs_pico8_ro  # noqa: E402
+
+        if not frogfs_pico8_ro.patch_frogfs_pico8_ro_inplace(
+            output,
+            extflash_base=args.extflash_base,
+            extflash_offset=args.extflash_offset,
+        ):
+            return 1
 
     size = output.stat().st_size
     if args.reserve_size and size > args.reserve_size:

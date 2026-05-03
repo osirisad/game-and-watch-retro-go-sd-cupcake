@@ -37,6 +37,9 @@
 #include "heap.hpp"
 #include "gw_flash.h"
 #include "gw_flash_alloc.h"
+#if SD_CARD == 0
+#include "rg_frogfs.h"
+#endif
 
 #define CORE_HEADER_MAGIC_INTERNAL "CORI"
 #define CORE_HEADER_MAGIC_EXTERNAL "CORE"
@@ -229,30 +232,12 @@ static uint8_t *Pico8CacheCodeToFlash(uint32_t *code_size_out)
     printf("P8: pico8.ro cache returned size 0\n");
     return NULL;
   }
-
+#if SD_CARD == 1
   int32_t offset = (int32_t)((uint32_t)code_addr - PICO8_CODE_BASE);
   printf("P8: pico8.ro cached at %p, size=%lu, offset=%ld\n",
          code_addr, (unsigned long)*code_size_out, (long)offset);
 
   uint8_t *target_addr = code_addr;
-#if SD_CARD == 0
-  if (*code_size_out > PICO8_CODE_CACHE_SIZE) {
-    printf("P8: pico8.ro too large for FrogFS XIP cache (%lu > %lu)\n",
-           (unsigned long)*code_size_out, (unsigned long)PICO8_CODE_CACHE_SIZE);
-    return NULL;
-  }
-
-  uintptr_t cache_start = ((uintptr_t)&__EXTFLASH_END__ - PICO8_CODE_CACHE_SIZE) & ~(uintptr_t)0xFFFu;
-  if (cache_start < (uintptr_t)&__EXTFLASH_START__) {
-    printf("P8: FrogFS XIP cache does not fit in extflash payload region\n");
-    return NULL;
-  }
-
-  target_addr = (uint8_t *)cache_start;
-  offset = (int32_t)((uint32_t)target_addr - PICO8_CODE_BASE);
-  printf("P8: FrogFS source is read-only; patching copy to XIP cache at %p, offset=%ld\n",
-         target_addr, (long)offset);
-#endif
 
   /* Step 2: Copy source content to RAM_EMU (temp buffer, overwritten by pico8.bin later). */
   printf("P8: copying %lu bytes from flash to RAM for patching...\n",
@@ -266,11 +251,7 @@ static uint8_t *Pico8CacheCodeToFlash(uint32_t *code_size_out)
                                  offset, *code_size_out);
   printf("P8: patched %d sentinel refs in code blob\n", patched);
 
-  if (patched > 0
-#if SD_CARD == 0
-      || target_addr != code_addr
-#endif
-      ) {
+  if (patched > 0) {
     /* Step 4: Program the patched content to XIP flash. */
     uint32_t flash_offset = (uint32_t)target_addr - (uint32_t)&__EXTFLASH_BASE__;
     uint32_t erase_size = (*code_size_out + 4095) & ~4095u;  /* Round up to 4KB */
@@ -291,8 +272,10 @@ static uint8_t *Pico8CacheCodeToFlash(uint32_t *code_size_out)
   } else {
     printf("P8: no sentinel refs found (already patched from previous boot)\n");
   }
-
   return target_addr;
+  #else
+  return code_addr;
+  #endif
 }
 
 const unsigned char *ROM_DATA = NULL;

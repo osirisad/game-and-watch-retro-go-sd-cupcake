@@ -122,6 +122,21 @@ def main():
         action="store_true",
         help="Copy the entire sd_content/cores tree (disable ROM-based selection).",
     )
+    parser.add_argument(
+        "--refresh-pico8-cores",
+        action="store_true",
+        help="Force re-download of the PICO-8 GNW cores ZIP when packing for pico8.",
+    )
+    parser.add_argument(
+        "--pico8-cores-url",
+        default=None,
+        help="Override URL for the PICO-8 GNW cores release ZIP (default: Macs75 v.1.1.3b bundle).",
+    )
+    parser.add_argument(
+        "--omit-pico8-ro-from-gnw-zip",
+        action="store_true",
+        help="Do not copy pico8.ro from the GNW ZIP (e.g. when it is bundled in FrogFS).",
+    )
     args = parser.parse_args()
 
     if args.size <= 0:
@@ -155,6 +170,7 @@ def main():
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     import sd_cores_pack  # noqa: E402
+    import pico8_gnw_cores  # noqa: E402
 
     project_roms = (repo / args.roms_dir).resolve()
     sd_roms_tree = sd_content / "roms"
@@ -205,6 +221,17 @@ def main():
                     else frozenset()
                 )
                 copied_files += copy_tree(fs, src, dest, exclude_relpaths=excl)
+        if "pico8" in active_systems:
+            url = args.pico8_cores_url or pico8_gnw_cores.PICO8_GNW_CORES_ZIP_URL
+            omit = frozenset({"pico8.ro"}) if args.omit_pico8_ro_from_gnw_zip else frozenset()
+            n = pico8_gnw_cores.fetch_and_merge_into_littlefs(
+                fs,
+                build_dir,
+                url,
+                force_refresh=args.refresh_pico8_cores,
+                omit_basenames=omit,
+            )
+            copied_files += n
         fs.unmount()
     except Exception:
         try:

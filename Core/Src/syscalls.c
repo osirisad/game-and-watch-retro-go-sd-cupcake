@@ -424,13 +424,23 @@ static bool path_has_prefix_dir(const char *path, const char *dir)
     return strncmp(path, dir, len) == 0 && (path[len] == '\0' || path[len] == '/');
 }
 
+static bool is_cores_pico8_ro_frogfs_path(const char *path)
+{
+    if (!path)
+        return false;
+    if (path[0] == '/')
+        path++;
+    return strcmp(path, "cores/pico8.ro") == 0;
+}
+
 static bool is_frogfs_path(const char *path)
 {
     return path_has_prefix_dir(path, "roms") ||
            path_has_prefix_dir(path, "covers") ||
            path_has_prefix_dir(path, "bios") ||
            path_has_prefix_dir(path, "fonts") ||
-           path_has_prefix_dir(path, "font");
+           path_has_prefix_dir(path, "font") ||
+           is_cores_pico8_ro_frogfs_path(path);
 }
 
 static const char *normalize_frogfs_path(const char *name, char *buffer, size_t buffer_size)
