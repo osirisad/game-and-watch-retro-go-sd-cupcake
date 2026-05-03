@@ -1144,7 +1144,18 @@ SD_FOLDER := sd_content
 CORES_DIR := $(SD_FOLDER)/cores
 FONTS_DIR := $(SD_FOLDER)/fonts
 UNICODE_FONT_SOURCE ?= assets/fonts/fusion-pixel-12px-monospaced-zh_hant.ttf
-UNICODE_FONT_SCRIPTS := greek math_operators geometric misc_symbols cjk_punct hiragana katakana cjk hangul fullwidth
+# tools/gen_unicode_bin.py --script names → /fonts/unicode_<name>.bin (trimmed by active UI langs)
+UNICODE_FONT_SCRIPTS := greek math_operators geometric misc_symbols
+ifneq ($(filter 1,$(ZH_CN) $(ZH_TW) $(JA_JP) $(KO_KR)),)
+# CJK Unified Ideographs (kanji / hanzi / hanja) + punctuation/fullwidth blocks
+UNICODE_FONT_SCRIPTS += cjk_punct fullwidth cjk
+endif
+ifeq ($(JA_JP),1)
+UNICODE_FONT_SCRIPTS += hiragana katakana
+endif
+ifeq ($(KO_KR),1)
+UNICODE_FONT_SCRIPTS += hangul
+endif
 UNICODE_FONT_BINS := $(addprefix $(FONTS_DIR)/unicode_, $(addsuffix .bin, $(UNICODE_FONT_SCRIPTS)))
 MAPPERS_DIR := $(CORES_DIR)/mappers
 HOMEBREWS_FOLDER := $(SD_FOLDER)/roms/homebrew
@@ -1237,12 +1248,18 @@ create_sd_data: create_sd_folders prepare_msx_bios_files $(MAPPER_BINS) $(BUILD_
 	@$(CP) -O binary --only-section=.overlay_smw $(BUILD_DIR)/$(TARGET).elf "$(HOMEBREWS_FOLDER)/Super Mario World.bin"
 	@$(CP) -O binary --only-section=.coleco_bios_data $(BUILD_DIR)/$(TARGET).elf $(SD_FOLDER)/bios/coleco/coleco.bin
 	@$(CP) -O binary --only-section=.overlay_graphics $(BUILD_DIR)/$(TARGET).elf $(CORES_DIR)/logo.bin
+	@rm -f $(FONTS_DIR)/cp1251_*.bin $(FONTS_DIR)/cp1252_*.bin $(FONTS_DIR)/unicode_*.bin
+ifeq ($(RU_RU),1)
+	@$(CP) -O binary --only-section=.sd_fonts_cp1251_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_serif.bin
+ifneq ($(SINGLE_FONT),1)
 	@$(CP) -O binary --only-section=.sd_fonts_cp1251_greybeard $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_greybeard.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1251_sans_serif_bold $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_sans_serif_bold.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1251_sans_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_sans_serif.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1251_serif_bold $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_serif_bold.bin
-	@$(CP) -O binary --only-section=.sd_fonts_cp1251_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_serif.bin
-	
+endif
+endif
+	@$(CP) -O binary --only-section=.sd_fonts_cp1252_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_serif.bin
+ifneq ($(SINGLE_FONT),1)
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_greybeard $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_greybeard.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_haeberli12 $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_haeberli12.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_rock12 $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_rock12.bin
@@ -1250,8 +1267,8 @@ create_sd_data: create_sd_folders prepare_msx_bios_files $(MAPPER_BINS) $(BUILD_
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_sans_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_sans_serif.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_serif_bold $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_serif_bold.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_serif_cjk $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_serif_cjk.bin
-	@$(CP) -O binary --only-section=.sd_fonts_cp1252_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_serif.bin
 	@$(CP) -O binary --only-section=.sd_fonts_cp1252_unbalanced $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1252_unbalanced.bin
+endif
 
 	@$(V)cp build/gw_retro_go_intflash.bin $(SD_FOLDER)/update_bank2.bin
 	@$(MAKE) --no-print-directory $(UNICODE_FONT_BINS)
@@ -1417,9 +1434,10 @@ help:
 	@echo "  ES_ES,PT_PT,FR_FR,  "
 	@echo "  IT_IT,ZH_CN,ZH_TW,  "
 	@echo "  KO_KR,JA_JP,DE_DE,  "
-	@echo "  RU_RU               - Set to 1 to include or exclude some other language"
-	@echo "  SINGLE_FONT         - Set to 1 to only include a single default font."
-	@echo "                        Saves a few dozen KB of external flash."
+	@echo "  RU_RU               - Set to 0 to omit Russian UI and CP1251 fonts on SD /fonts."
+	@echo "  SINGLE_FONT         - Set to 1 to only include the default serif font (per codepage)."
+	@echo "                        Fewer font sections in firmware and only cp1252_serif.bin (+ cp1251 if RU_RU) on /fonts."
+	@echo "                        Unicode fallback .bin files on /fonts follow active ZH_CN,ZH_TW,JA_JP,KO_KR (+ small symbol sets)."
 	@echo "  COVERFLOW           - Set to 1 include cover art with rom (default=0)"
 	@echo "  JPG_QUALITY         - Set convert cover art image jpg quality (default = 90)"
 	@echo "  ENABLE_SCREENSHOT   - Set to 1 to enable screenshot support (default enabled)"
@@ -1462,6 +1480,7 @@ help:
 	@echo "  ZH_TW=$(ZH_TW)"
 	@echo "  KO_KR=$(KO_KR)"
 	@echo "  JA_JP=$(JA_JP)"
+	@echo "  SINGLE_FONT=$(SINGLE_FONT)"
 	@echo ""
 	@echo "Targets:"
 	@echo "  docker            - Runs a docker container using the image created by docker_build"
