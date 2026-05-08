@@ -434,7 +434,14 @@ def copy_byteswapped_16(src, dst):
     shutil.copystat(src, dst)
 
 
-def stage_input_dirs(collect_dirs, stage_dir, roms_exclude_top=None, roms_skip_rel_paths=None):
+def stage_input_dirs(
+    collect_dirs,
+    stage_dir,
+    roms_exclude_top=None,
+    roms_skip_rel_paths=None,
+    *,
+    skip_bios_msx=False,
+):
     """Merge multiple (src, dest) with the same dest into one staged tree."""
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
@@ -456,6 +463,13 @@ def stage_input_dirs(collect_dirs, stage_dir, roms_exclude_top=None, roms_skip_r
         for src in sources:
             for path in src.rglob("*"):
                 rel_path = path.relative_to(src)
+                if (
+                    skip_bios_msx
+                    and dest == "bios"
+                    and rel_path.parts
+                    and rel_path.parts[0].lower() == "msx"
+                ):
+                    continue
                 if dest == "roms" and skip_under_roms_top(rel_path, roms_exclude_top):
                     continue
                 staged_path = staged_root / rel_path
@@ -668,11 +682,19 @@ def main():
     if smw_frogfs_built:
         roms_skip_merged = roms_skip_merged | smw_rom_skip_rels
 
+    skip_bios_msx = "msx" not in active_systems
+    if skip_bios_msx:
+        print(
+            "frogfs: omitting bios/msx (no roms/msx tree with game files)",
+            file=sys.stderr,
+        )
+
     staged_dirs, byteswapped_count = stage_input_dirs(
         collect_dirs,
         build_dir / "input",
         roms_exclude_top=frozenset(roms_exclude),
         roms_skip_rel_paths=roms_skip_merged,
+        skip_bios_msx=skip_bios_msx,
     )
 
     if args.rom_compression == "lzma":
