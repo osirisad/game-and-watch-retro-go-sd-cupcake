@@ -1258,7 +1258,7 @@ create_sd_data: create_sd_folders prepare_msx_bios_files $(MAPPER_BINS) $(BUILD_
 	@$(CP) -O binary --only-section=.rodata_zelda3 $(BUILD_DIR)/$(TARGET).elf "$(HOMEBREWS_FOLDER)/zelda3.ro"
 	@$(CP) -O binary --only-section=.overlay_smw $(BUILD_DIR)/$(TARGET).elf "$(HOMEBREWS_FOLDER)/Super Mario World.bin"
 	@$(CP) -O binary --only-section=.coleco_bios_data $(BUILD_DIR)/$(TARGET).elf $(SD_FOLDER)/bios/coleco/coleco.bin
-	@$(CP) -O binary --only-section=.overlay_graphics $(BUILD_DIR)/$(TARGET).elf $(CORES_DIR)/logo.bin
+	@$(CP) -O binary --only-section=.overlay_graphics $(BUILD_DIR)/$(TARGET).elf $(SD_FOLDER)/bios/logo.bin
 	@rm -f $(FONTS_DIR)/cp1251_*.bin $(FONTS_DIR)/cp1252_*.bin $(FONTS_DIR)/unicode_*.bin
 ifeq ($(RU_RU),1)
 	@$(CP) -O binary --only-section=.sd_fonts_cp1251_serif $(BUILD_DIR)/$(TARGET).elf $(FONTS_DIR)/cp1251_serif.bin
@@ -1334,7 +1334,7 @@ flash_sd: CheckTools CheckDirtySubmodules $(BUILD_DIR)/$(TARGET)_intflash.bin cr
 		-- sdpush --file $(CORES_DIR)/videopac.bin --dest-path "/cores/" \
 		-- sdpush --file $(CORES_DIR)/tama.bin --dest-path "/cores/" \
 		-- sdpush --file $(CORES_DIR)/pkmini.bin --dest-path "/cores/" \
-		-- sdpush --file $(CORES_DIR)/logo.bin --dest-path "/cores/" \
+		-- sdpush --file $(SD_FOLDER)/bios/logo.bin --dest-path "/bios/" \
 		-- sdpush --file $(HOMEBREWS_FOLDER)/celeste.bin --dest-path "/roms/homebrew/" \
 		-- sdpush --file "$(HOMEBREWS_FOLDER)/Super Mario World.bin" --dest-path "/roms/homebrew/" \
 		-- sdpush --file "$(HOMEBREWS_FOLDER)/Zelda 3.bin" --dest-path "/roms/homebrew/" \
