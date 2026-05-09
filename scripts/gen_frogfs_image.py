@@ -513,6 +513,12 @@ def main():
         help="Do not run tools/gencovers.py; only sd_content/covers is used for /covers (if any).",
     )
     parser.add_argument(
+        "--no-covers",
+        action="store_true",
+        help="Omit the /covers tree from FrogFS (skip gencovers and sd_content/covers). "
+        "Use when firmware is built with COVERFLOW!=1.",
+    )
+    parser.add_argument(
         "--bundle-pico8-ro-in-frogfs",
         action="store_true",
         help="When roms/pico8 is active: add pico8.ro from GNW ZIP to FrogFS /cores and post-patch XiP sentinels.",
@@ -570,6 +576,8 @@ def main():
     build_dir.mkdir(parents=True, exist_ok=True)
 
     requested_dirs = tuple(args.include) if args.include else DEFAULT_DIRS
+    if args.no_covers:
+        requested_dirs = tuple(d for d in requested_dirs if d != "covers")
     collect_dirs = []
 
     project_roms = (repo / args.roms_dir).resolve()
