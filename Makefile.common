@@ -844,7 +844,7 @@ ifeq (${CHECK_TOOLS},1)
 CheckTools:
 	@# Check that the tools in the toolchain exist
 	$(V)/usr/bin/env bash -c " \
-		for tool in $(CC) $(CP) $(SZ) $(GDB) $(DUMP); do \
+		for tool in $(CC) $(CP) $(SZ) $(DUMP); do \
 		which \$$tool 2> /dev/null > /dev/null || \
 		( \
 			echo -e \"\nCannot find \$$tool\n\" && \
