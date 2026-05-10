@@ -382,8 +382,18 @@ Core/Src/retro-go/i18n/rg_i18n.c \
 Core/Src/retro-go/rg_logos.c
 
 # Version and URL for the STM32CubeH7 SDK
-SDK_VERSION ?= v1.11.1
+SDK_VERSION ?= v1.13.0
 SDK_URL ?= https://raw.githubusercontent.com/STMicroelectronics/STM32CubeH7
+
+# Submodule repos (used from v1.12.0+)
+# Check https://htmlpreview.github.io/?https://github.com/STMicroelectronics/STM32CubeH7/blob/master/Release_Notes.html
+# page to find about new releases and Drivers version section to find correct
+# CMSIS_DEVICE_VERSION (STM32H7xx CMSIS) and HAL_DRIVER_VERSION (STM32H7xx HAL)
+CMSIS_DEVICE_VERSION ?= v1.10.7
+CMSIS_DEVICE_URL ?= https://raw.githubusercontent.com/STMicroelectronics/cmsis-device-h7
+
+HAL_DRIVER_VERSION ?= v1.11.6
+HAL_DRIVER_URL ?= https://raw.githubusercontent.com/STMicroelectronics/stm32h7xx-hal-driver
 
 # Local path for the SDK
 SDK_DIR ?= Drivers
@@ -439,6 +449,7 @@ SDK_HEADERS = \
 Drivers/CMSIS/Device/ST/STM32H7xx/Include/stm32h7b0xx.h \
 Drivers/CMSIS/Device/ST/STM32H7xx/Include/stm32h7xx.h \
 Drivers/CMSIS/Device/ST/STM32H7xx/Include/system_stm32h7xx.h \
+Drivers/CMSIS/Include/cachel1_armv7.h \
 Drivers/CMSIS/Include/cmsis_compiler.h \
 Drivers/CMSIS/Include/cmsis_gcc.h \
 Drivers/CMSIS/Include/cmsis_version.h \
@@ -1598,8 +1609,18 @@ help:
 #######################################
 # download SDK files
 #######################################
+Drivers/STM32H7xx_HAL_Driver/%:
+	$(V)$(ECHO) [ WGET STM32CubeH7 HAL ] $(notdir $@)
+	$(V)mkdir -p $(dir $@)
+	$(V)wget -q $(HAL_DRIVER_URL)/$(HAL_DRIVER_VERSION)/$* -O $@
+
+Drivers/CMSIS/Device/ST/STM32H7xx/%:
+	$(V)$(ECHO) [ WGET STM32CubeH7 CMSIS ] $(notdir $@)
+	$(V)mkdir -p $(dir $@)
+	$(V)wget -q $(CMSIS_DEVICE_URL)/$(CMSIS_DEVICE_VERSION)/$* -O $@
+
 $(SDK_DIR)/%:
-	$(V)$(ECHO) [ WGET ] $(notdir $@)
+	$(V)$(ECHO) [ WGET STM32CubeH7 ] $(notdir $@)
 	$(V)wget -q $(SDK_URL)/$(SDK_VERSION)/$@ -P $(dir $@)
 
 .PHONY: download_sdk
