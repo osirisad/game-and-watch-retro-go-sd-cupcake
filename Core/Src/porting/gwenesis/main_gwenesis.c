@@ -71,6 +71,23 @@ static unsigned int gwenesis_audio_pll_sync = 0;
 
 static int hori_screen_offset, vert_screen_offset;
 
+/* GPGX-aligned H-INT counter (persists across frames, reloaded on last vblank line). */
+static int hint_counter = 0xff;
+static int skip_first_vint = 1;
+
+#define VINT_H32_CYCLES 770u
+#define VINT_H40_CYCLES 788u
+
+static inline void gwenesis_run_cpus_to(unsigned target)
+{
+  m68k_run((int)target);
+  z80_run((int)target);
+  if (GWENESIS_AUDIO_ACCURATE == 0) {
+    gwenesis_SN76489_run((int)target);
+    ym2612_run((int)target);
+  }
+}
+
 /* Clocks and synchronization */
 /* system clock is video clock */
 int system_clock;
@@ -644,6 +661,8 @@ int app_main_gwenesis(uint8_t load_state, uint8_t start_paused, int8_t save_slot
 
     power_on();
     reset_emulation();
+    hint_counter = 0xff;
+    skip_first_vint = 1;
 
     /* Load battery-backed SRAM: one raw file per game (path basename, not slot) */
     if (gwenesis_sram_enabled) {
@@ -660,12 +679,13 @@ int app_main_gwenesis(uint8_t load_state, uint8_t start_paused, int8_t save_slot
     extern unsigned char gwenesis_vdp_regs[0x20];
     extern unsigned short gwenesis_vdp_status;
     extern unsigned int screen_width, screen_height;
-    int hint_counter;
     extern int hint_pending;
     volatile unsigned int current_frame;
 
     if (load_state) {
         odroid_system_emu_load_state(save_slot);
+        hint_counter = (int)gwenesis_vdp_regs[10];
+        skip_first_vint = 0;
     } else {
         lcd_clear_buffers();
     }
@@ -713,7 +733,7 @@ int app_main_gwenesis(uint8_t load_state, uint8_t start_paused, int8_t save_slot
 
         ODROID_DIALOG_CHOICE_LAST};
 
-    hint_counter = gwenesis_vdp_regs[10];
+      hint_pending = 0;
 
       screen_height = REG1_PAL ? 240 : 224;  /* game-selectable: 224 or 240 active lines */
       screen_width = REG12_MODE_H40 ? 320 : 256;
@@ -755,92 +775,83 @@ int app_main_gwenesis(uint8_t load_state, uint8_t start_paused, int8_t save_slot
       sn76489_clock = 0;
       sn76489_index = 0;
 
-    scan_line=0;
+    scan_line = 0;
 
-    while (scan_line < lines_per_frame) {
+    /* Frame loop aligned with Genesis Plus GX system_frame_gen():
+     * vblank-first scan order, VINT delay, H-INT on active lines only. */
+    {
+      const unsigned vint_cycles =
+          REG12_MODE_H40 ? VINT_H40_CYCLES : VINT_H32_CYCLES;
+      int line;
 
-        /* CPUs */
-        m68k_run(system_clock + VDP_CYCLES_PER_LINE);
-        z80_run(system_clock + VDP_CYCLES_PER_LINE);
+      gwenesis_vdp_status =
+          (unsigned short)((gwenesis_vdp_status & (unsigned short)~0x0112u) |
+                           STATUS_VBLANK);
+      gwenesis_vdp_status ^= STATUS_ODDFRAME;
 
-        /* Audio */
-        /*  GWENESIS_AUDIO_ACCURATE:
-        *    =1 : cycle accurate mode. audio is refreshed when CPUs are performing a R/W access
-        *    =0 : line  accurate mode. audio is refreshed every lines.
-        */
-       if (GWENESIS_AUDIO_ACCURATE == 0) {
-          gwenesis_SN76489_run(system_clock + VDP_CYCLES_PER_LINE);
-          ym2612_run(system_clock + VDP_CYCLES_PER_LINE);
-        }
+      if (hint_counter == 0) {
+        hint_pending = 1;
+        if (REG0_LINE_INTERRUPT &&
+            (gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
+          m68k_update_irq(4);
+      }
 
-        /* Video */
-        if (drawFrame)
-          gwenesis_vdp_render_line(scan_line); /* render scan_line */
+      /* First vblank line (=VINT), with optional delay before IRQ. */
+      scan_line = screen_height;
+      if (!skip_first_vint) {
+        gwenesis_run_cpus_to(system_clock + vint_cycles);
+        gwenesis_vdp_status |= STATUS_VIRQPENDING;
+        if (REG1_VBLANK_INTERRUPT != 0)
+          m68k_set_irq(6);
+        z80_irq_line(1);
+      }
+      gwenesis_run_cpus_to(system_clock + VDP_CYCLES_PER_LINE);
+      system_clock += VDP_CYCLES_PER_LINE;
+      z80_irq_line(0);
 
-        // H-interrupt line counter.
-        //
-        // Real hardware behaviour (verified against clownmdemu and Nemesis docs):
-        //   * The counter decrements every scanline, active display AND VBlank.
-        //   * It reloads to REG10 whenever it underflows.
-        //   * An actual IRQ4 is only raised during active display (scan_line < screen_height).
-        //   * The counter is reloaded on the very last VBlank line (lines_per_frame-1),
-        //     equivalent to clownmdemu's "scanline -1", so active display always starts
-        //     with a deterministic counter value independent of VBlank length.
-        //     This makes H-int fire at lines 0, REG10+1, 2*(REG10+1), ... every frame,
-        //     which is what raster-effect games (like Ayrton Senna's Super Monaco GP II)
-        //     depend on for palette zones and sky gradients.
-
-        // Reload on the last VBlank line, just before active display.
-        if (scan_line == (lines_per_frame - 1))
-          hint_counter = REG10_LINE_COUNTER;
-
-        // Decrement every line; fire IRQ4 during active display (0..screen_height-1)
-        // AND on the last VBlank line (lines_per_frame-1 = clownmdemu's "scanline -1").
-        // Firing on that last VBlank line lets the handler run during scan_line 0's
-        // CPU time, before render_line(0) is called.  This matches clownmdemu, which
-        // fires H-int on scanlines -1..223.  Without it, the very first scan line of
-        // each frame is rendered with the previous frame's reg7 value, causing a
-        // visible wrong background colour on line 0 (e.g. the rear-view mirror zone
-        // in Ayrton Senna's Super Monaco GP II).
-        if (--hint_counter < 0) {
-          if ((REG0_LINE_INTERRUPT != 0) &&
-              (scan_line < screen_height || scan_line == lines_per_frame - 1)) {
-            hint_pending = 1;
-            // printf("Line int pending %d\n", scan_line);
-            if ((gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
-              m68k_update_irq(4);
-          }
-          hint_counter = REG10_LINE_COUNTER;
-        }
-
-        scan_line++;
-
-        // vblank begin at the end of last rendered line
-        if (scan_line == screen_height) {
-
-          // Toggle the ODD-FRAME bit in the VDP status register.
-          // On real hardware this bit flips every frame (bit 4 of the status word).
-          // Games read it to detect frame parity and use it for:
-          //   - Palette cycling animations (sky gradients, day/night cycles)
-          //   - Sprite flickering / interlace tricks
-          // Without this toggle the bit is always 0, causing games like Ayrton
-          // Senna's Super Monaco GP II to permanently take the "even frame" branch
-          // of their animation code, making palette zones flicker every other frame.
-          gwenesis_vdp_status ^= STATUS_ODDFRAME;
-
-          if (REG1_VBLANK_INTERRUPT != 0) {
-            // printf("IRQ VBLANK\n");
-            gwenesis_vdp_status |= STATUS_VIRQPENDING;
-            m68k_set_irq(6);
-          }
-          z80_irq_line(1);
-        }
-        if (scan_line == (screen_height + 1)) {
-
-          z80_irq_line(0);
-        }
-
+      /* Remaining vblank lines (no H-INT counter). */
+      for (line = (int)screen_height + 1; line < (int)lines_per_frame - 1;
+           line++) {
+        scan_line = (unsigned int)line;
+        gwenesis_run_cpus_to(system_clock + VDP_CYCLES_PER_LINE);
         system_clock += VDP_CYCLES_PER_LINE;
+      }
+
+      /* Last vblank line: reload H-INT counter, clear VBLANK flag.
+       * Also fire H-INT here when the counter underflows (clownmdemu
+       * "scanline -1") so line-0 raster handlers run before render_line(0). */
+      scan_line = lines_per_frame - 1;
+      hint_counter = (int)REG10_LINE_COUNTER;
+      gwenesis_vdp_status &= (unsigned short)~STATUS_VBLANK;
+      if (--hint_counter < 0) {
+        hint_pending = 1;
+        if (REG0_LINE_INTERRUPT &&
+            (gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
+          m68k_update_irq(4);
+        hint_counter = (int)REG10_LINE_COUNTER;
+      }
+      gwenesis_run_cpus_to(system_clock + VDP_CYCLES_PER_LINE);
+      system_clock += VDP_CYCLES_PER_LINE;
+
+      /* Active display (H-INT before CPU run for each line). */
+      for (line = 0; line < (int)screen_height; line++) {
+        scan_line = (unsigned int)line;
+        if (hint_counter == 0) {
+          hint_counter = (int)REG10_LINE_COUNTER;
+          hint_pending = 1;
+          if (REG0_LINE_INTERRUPT &&
+              (gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
+            m68k_update_irq(4);
+        } else {
+          hint_counter--;
+        }
+        gwenesis_run_cpus_to(system_clock + VDP_CYCLES_PER_LINE);
+        if (drawFrame)
+          gwenesis_vdp_render_line(line);
+        system_clock += VDP_CYCLES_PER_LINE;
+      }
+
+      skip_first_vint = 0;
     }
 
       /* Audio
