@@ -1634,6 +1634,24 @@ docker_build:
 	$(V)docker build --network=host --build-arg ARM_COMPILER_VERSION=$(ARM_COMPILER_VERSION) -f Dockerfile --tag $(DOCKER_IMAGE) .
 .PHONY: docker_build
 
+# This is used to update multi arch (amd64/arm64) image on docker.io
+# you need to run this once to setup dockerx :
+#  docker buildx create --name multiarch --use && docker buildx inspect --bootstrap
+# and to login to your docker account :
+#  docker login
+docker_buildx:
+	$(V)docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		--network=host \
+		--build-arg ARM_COMPILER_VERSION=$(ARM_COMPILER_VERSION) \
+		-f Dockerfile \
+		-t $(DOCKER_REPOSITORY):latest \
+		-t $(DOCKER_REPOSITORY):$(RELEASE_VERSION) \
+		--push \
+		.
+
+.PHONY: docker_push_multiarch
+
 # DEPRECATED: use 'make release DOCKER=1' (SD_CARD=1) or 'make docker_shell' instead.
 # This target will be removed in a future release.
 docker:
@@ -1743,6 +1761,7 @@ help:
 	@echo "                        Applies to: (default), flash, flash_intflash, flash_extflash,"
 	@echo "                        flash_sd, release, release_sdpush."
 	@echo "  docker_build          - Build the Docker container image"
+	@echo "  docker_buildx         - Push Docker container image to docker.io"
 	@echo "  docker_shell          - Interactive shell in $(DOCKER_IMAGE)"
 	@echo "  docker (deprecated)   - Use 'make release DOCKER=1' or 'make docker_shell' instead"
 	@echo "  dump_screenshot   - Downloads the stored screenshot."
