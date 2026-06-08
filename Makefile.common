@@ -21,9 +21,10 @@ LARGE_FLASH ?= 0
 SD_CARD ?= 1
 
 # Docker image for reproducible ARM builds (see targets docker, docker_build).
-RELEASE_VERSION ?= v1.4
+RELEASE_VERSION ?= v1.5
 CONTAINER_NAME ?= retro-go-sd
-DOCKER_IMAGE ?= sylverb/retro-go-sd-builder:$(RELEASE_VERSION)
+DOCKER_REPOSITORY ?= sylverb/retro-go-sd-builder
+DOCKER_IMAGE ?= $(DOCKER_REPOSITORY):$(RELEASE_VERSION)
 DOCKER_RUN := docker run --rm -it \
     --network host \
     --name $(CONTAINER_NAME) \
@@ -41,7 +42,7 @@ DOCKER ?= 0
 _DOCKER_FWDVARS := $(filter-out DOCKER=%,$(MAKEOVERRIDES))
 
 # Docker bulid args
-ARM_COMPILER_VERSION ?= 15.2.rel1
+ARM_COMPILER_VERSION ?= 13.3.rel1
 
 # Configure where data is stored in the external flash by
 # setting EXTFLASH_OFFSET. Useful if the first 1MB/4MB are to be preserved.
@@ -256,6 +257,7 @@ FR_FR ?= 1
 IT_IT ?= 1
 RU_RU ?= 1
 DE_DE ?= 1
+NO_NB ?= 1
 ZH_CN ?= 0
 ZH_TW ?= 0
 KO_KR ?= 0
@@ -296,6 +298,9 @@ else ifeq ($(CODEPAGE), 12521)
 else ifeq ($(CODEPAGE), 12525)
 	DE_DE = 1
 	SCODEPAGE = "iso-8859-1"
+else ifeq ($(CODEPAGE), 12526)
+	NO_NB = 1
+	SCODEPAGE = "iso-8859-1"
 else
     SCODEPAGE = "iso-8859-1"
 endif
@@ -321,6 +326,8 @@ else ifeq ($(UICODEPAGE), 12521)
 	RU_RU = 1
 else ifeq ($(UICODEPAGE), 12525)
 	DE_DE = 1
+else ifeq ($(UICODEPAGE), 12526)
+	NO_NB = 1
 endif
 
 ROMINFOCODE ?= $(SCODEPAGE)
@@ -605,6 +612,7 @@ C_DEFS +=  \
 -DINCLUDED_FR_FR=$(FR_FR) \
 -DINCLUDED_IT_IT=$(IT_IT) \
 -DINCLUDED_DE_DE=$(DE_DE) \
+-DINCLUDED_NO_NB=$(NO_NB) \
 -DINCLUDED_RU_RU=$(RU_RU) \
 -DINCLUDED_ZH_CN=$(ZH_CN) \
 -DINCLUDED_ZH_TW=$(ZH_TW) \
@@ -1300,6 +1308,9 @@ endif
 ifeq ($(DE_DE),1)
 LANG_BIN_NAMES += de_de
 endif
+ifeq ($(NO_NB),1)
+LANG_BIN_NAMES += no_nb
+endif
 ifeq ($(RU_RU),1)
 LANG_BIN_NAMES += ru_ru
 endif
@@ -1671,13 +1682,13 @@ help:
 	@echo "  CODEPAGE            - Sets codepage to configures default display language.(default=1252)"
 	@echo "                        set 932 as Japanese; 936 as simple Chinese; 950 as traditional Chinese;"
 	@echo "                        949 as Korean; 12511 as Russian; 12521 as Spanish; 12522 as Portuguese;"
-	@echo "                        12523 as French; 12524 as Italian; 12525 as German;"
+	@echo "                        12523 as French; 12524 as Italian; 12525 as German; 12526 as Norwegian;"
 	@echo "  UICODEPAGE          - Sets ui display language.(default=CODEPAGE=1252 as English)"
 	@echo "  ROMINFOCODE         - Sets encoding of parse rom name, default = ascii"
 	@echo "  ES_ES,PT_PT,FR_FR,  "
 	@echo "  IT_IT,ZH_CN,ZH_TW,  "
 	@echo "  KO_KR,JA_JP,DE_DE,  "
-	@echo "  RU_RU               - Set to 0 to omit Russian UI and CP1251 fonts on SD /fonts."
+	@echo "  NO_NB,RU_RU         - Set to 0 to omit language UI and fonts on SD /lang and /fonts."
 	@echo "  SINGLE_FONT         - Set to 1 to only include the default serif font (per codepage)."
 	@echo "                        Fewer font sections in firmware and only cp1252_serif.bin (+ cp1251 if RU_RU) on /fonts."
 	@echo "                        Unicode fallback .bin files on /fonts follow active ZH_CN,ZH_TW,JA_JP,KO_KR (+ small symbol sets)."
@@ -1719,6 +1730,7 @@ help:
 	@echo "  IT_IT=$(IT_IT)"
 	@echo "  RU_RU=$(RU_RU)"
 	@echo "  DE_DE=$(DE_DE)"
+	@echo "  NO_NB=$(NO_NB)"
 	@echo "  ZH_CN=$(ZH_CN)"
 	@echo "  ZH_TW=$(ZH_TW)"
 	@echo "  KO_KR=$(KO_KR)"
