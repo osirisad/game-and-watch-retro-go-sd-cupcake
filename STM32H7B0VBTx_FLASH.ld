@@ -612,6 +612,30 @@ INCLUDE build/fceumm_mappers.ld
   }
   _OVERLAY_CELESTE_BSS_SIZE = SIZEOF(.overlay_celeste_bss);
 
+  .overlay_cupcake __RAM_EMU_START__ : {
+    . = ALIGN(4);
+    __ram_emu_cupcake_start__ = .;
+    KEEP(*(.cupcake_entry))
+    KEEP(*(.cupcake_entry*))
+    build/cupcake/*.o (.data .data* .text .text* .rodata .rodata*)
+    . = ALIGN(4);
+    _OVERLAY_CUPCAKE_LOAD_END = .;
+  } AT > CORES
+  _OVERLAY_CUPCAKE_LOAD_START = LOADADDR(.overlay_cupcake);
+  _OVERLAY_CUPCAKE_SIZE = SIZEOF(.overlay_cupcake);
+
+  .overlay_cupcake_bss _OVERLAY_CUPCAKE_LOAD_END : {
+    . = ALIGN(4);
+    _OVERLAY_CUPCAKE_BSS_START = .;
+    build/cupcake/*.o (.bss .bss*)
+    . = ALIGN(4);
+    build/cupcake/*.o (COMMON)
+    __ram_emu_cupcake_end__ = .;
+    _OVERLAY_CUPCAKE_BSS_END = .;
+    ASSERT(ABSOLUTE(_OVERLAY_CUPCAKE_BSS_END) < __RAM_EMU_END__, "Error: CUPCAKE BSS overflow");
+  }
+  _OVERLAY_CUPCAKE_BSS_SIZE = SIZEOF(.overlay_cupcake_bss);
+
   /* PICO-8 stub overlay → RAM, placed at the LOW end of the LCD bonus
      area. Same VMA as the runtime-loaded pico8.bin so engine RAM refs
      resolve. In SD_CARD=0 builds the SD-built pico8.bin/.ro/_itcm.bin

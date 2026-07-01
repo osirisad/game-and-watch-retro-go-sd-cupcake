@@ -28,6 +28,7 @@
 #include "main_smw.h"
 #include "main_videopac.h"
 #include "main_celeste.h"
+#include "main_cupcake.h"
 #include "main_pico8.h"
 #include "main_tama.h"
 #include "main_pkmini.h"
@@ -1220,7 +1221,8 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
 #endif
 #endif
     } else if(strcmp(system_name, "Homebrew") == 0)  {
-      if (odroid_overlay_cache_file_in_ram(ACTIVE_FILE->path, (uint8_t *)&__RAM_EMU_START__)) {
+      size_t loaded = odroid_overlay_cache_file_in_ram(ACTIVE_FILE->path, (uint8_t *)&__RAM_EMU_START__);
+      if (loaded) {
         if (strcmp(newfile->name,"celeste") == 0) {
             memset(&_OVERLAY_CELESTE_BSS_START, 0x0, (size_t)&_OVERLAY_CELESTE_BSS_SIZE);
             SCB_CleanDCache_by_Addr((uint32_t *)&__RAM_EMU_START__, (size_t)&_OVERLAY_CELESTE_SIZE);
@@ -1233,6 +1235,29 @@ void emulator_start(retro_emulator_file_t *file, bool load_state, bool start_pau
             memset(&_OVERLAY_SMW_BSS_START, 0x0, (size_t)&_OVERLAY_SMW_BSS_SIZE);
             SCB_CleanDCache_by_Addr((uint32_t *)&__RAM_EMU_START__, (size_t)&_OVERLAY_SMW_SIZE);
             app_main_smw(load_state, start_paused, save_slot);
+        } else if (strcmp(newfile->name,"cupcake") == 0) {
+            if (loaded < 400000u)
+                printf("HB: WARNING cupcake.bin is %u bytes — firmware stub is ~few KB;\n"
+                       "     copy port release/cupcake.bin (~583488 bytes) to /roms/homebrew/\n",
+                       (unsigned)loaded);
+            /* External cupcake.bin from the port repo can be much larger than
+             * the in-firmware stub — BSS follows the loaded image in RAM. */
+            extern uint32_t __RAM_EMU_END__;
+            uint8_t *bss = (uint8_t *)&__RAM_EMU_START__ + loaded;
+            uintptr_t bss_end = (uintptr_t)&__RAM_EMU_END__;
+            size_t bss_bytes = 0;
+
+            if (bss_end > (uintptr_t)bss)
+                bss_bytes = (size_t)(bss_end - (uintptr_t)bss);
+            if (bss_bytes)
+                memset(bss, 0, bss_bytes);
+            SCB_CleanDCache_by_Addr((uint32_t *)&__RAM_EMU_START__, (uint32_t)loaded);
+            if (bss_bytes)
+                SCB_InvalidateDCache_by_Addr((uint32_t *)bss, (int32_t)bss_bytes);
+            SCB_InvalidateICache();
+            /* Entry trampoline zeroes BSS and sets ram_start before app_main. */
+            ((void (*)(uint8_t, uint8_t, int8_t))((uintptr_t)&__RAM_EMU_START__ | 1))(
+                load_state, start_paused, save_slot);
         }
       }
     } else if(strcmp(system_name, "Tamagotchi") == 0) {

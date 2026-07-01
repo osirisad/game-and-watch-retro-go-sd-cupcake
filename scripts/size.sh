@@ -67,6 +67,7 @@ print_simple_usage rodata_zelda3
 print_usage ram_emu_smw  __RAM_EMU_LENGTH__
 print_usage ram_emu_videopac  __RAM_EMU_LENGTH__
 print_usage ram_emu_celeste  __RAM_EMU_LENGTH__
+print_usage ram_emu_cupcake  __RAM_EMU_LENGTH__
 print_usage ram_emu_tama __RAM_EMU_LENGTH__
 print_usage ram_emu_pkmini __RAM_EMU_LENGTH__
 print_usage ahbram   __AHBRAM_LENGTH__
